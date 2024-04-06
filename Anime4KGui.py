@@ -30,65 +30,43 @@ AUDIO_RUNNING = False
 def make_window(theme):
     sg.theme(theme)
 
-    upscale_layout = [
-        [sg.Text("Choose a input file")],
-        [
-            sg.Input(key='upscale_input_inputfilename', enable_events=True, readonly=True), 
-            sg.FileBrowse()
-        ],
-        [sg.Text("Choose if you input file is 10bit: "), sg.Checkbox('Yes', default=False, key='upscale_checkbox_10bit')],
-        [sg.T('', font='any 1')],
-        [sg.Text("Choose your shader directory")],
-        [
-            sg.Input(key='upscale_input_shaderdir', enable_events=True, readonly=True), 
-            sg.FolderBrowse()
-        ],
-        [sg.T('', font='any 1')],
-        [
-            sg.Text("Width (in px):"),
-            sg.Input(key='upscale_input_width', default_text="3840", size=(7,)), 
-            sg.Text("Height (in px):"),
-            sg.Input(key='upscale_input_height', default_text="2160",size=(7,))
-        ],
+# upscale関数内
+def upscale(values):
+    global UPSCALE_FINISHED
+    fn = values['upscale_input_inputfilename']
+    bit = True if values['upscale_checkbox_10bit'] == 1 else False
+    shader_dir = values['upscale_input_shaderdir']
+    width = int(values['upscale_input_width'])
+    height = int(values['upscale_input_height'])
 
-        [sg.Text('Quality and Mode Options:')],
-        [sg.Text("Choose what to use when encoding after applying shaders:")],
-        [
-            sg.Combo(values=[
-                'CPU (only x264 4:4:4) - needs to be converted to x265 later', 
-                'GPU (NVENC HEVC/X265 - NVIDIA ONLY - no conversation necessary'
-                ], key='upscale_combo_cg_choice', default_value=cg_choice_default)
-        ],
-        [sg.Text("Choose your Option for the Shader Mode:")],
-        [
-            sg.Combo(values=[
-                'Remain as faithful to the original while enhancing details', 
-                'Improve perceptual quality',
-                'Improve perceptual quality + deblur'
-                ], key='upscale_combo_shader_mode_choice', default_value=shader_mode_choice_default)
-        ],
-        [sg.T('', font='any 1')],
-        [sg.Text("Choose a Quality preset for encoding. \n\nThis will influence the shaders used but no the encoding preset itself:")],
-        [
-            sg.Combo(values=[
-                'Fast', 
-                'Medium',
-                'Make my GPU hurt'
-                ], key='upscale_combo_shader_quality_choice', default_value=shader_quality_choice_default)
-        ],
-        [sg.T('', font='any 1')],
-        [sg.Text("Please choose your Bilateral Denoise Mode:")],
-        [
-            sg.Combo(values=[
-                'Mode (not so heavy)', 
-                '[Recommended] Median (heavier)'
-                ], key='upscale_combo_shader_bilateral_choice', default_value=shader_bilateral_choice_default)
-        ],
-        [sg.T('', font='any 1')],
-        [sg.Text("Specify your x264 Options")],
-        [sg.Text("x264 preset"), sg.Combo(values=["veryfast", "fast", "medium", "slow", "veryslow"], key='upscale_combo_x264_preset', default_value=x264_preset_default)],
-        [sg.Text("x264 lossless"), sg.Checkbox('Yes', default=str2bool(x264_lossless_default), key='upscale_checkbox_x264_lossless')],
+    cg_choice = 'GPU' if 'GPU' in values['upscale_combo_cg_choice'] else 'CPU'
 
+    shader_mode_choice = 2  # Improve perceptual quality + deblur is the default option
+
+    shader_quality_choice = 1  # Medium is the default option
+
+    shader_bilateral_choice = 1  # [Recommended] Median (heavier) is the default option
+
+    x264_preset = values['upscale_combo_x264_preset'] if values['upscale_combo_x264_preset'] != '' else 'medium'
+    x264_lossless = int(values['upscale_checkbox_x264_lossless'])
+
+    opts = GUI_OPTS
+    opts['upscale']['width'] = width
+    opts['upscale']['height'] = height
+    opts['upscale']['cg_choice'] = 1 if cg_choice == 'GPU' else 0  # GPU = 1, CPU = 0
+    opts['upscale']['shader_mode_choice'] = shader_mode_choice
+    opts['upscale']['shader_quality_choice'] = shader_quality_choice
+    opts['upscale']['shader_bilateral_choice'] = shader_bilateral_choice
+    opts['upscale']['x264_preset'] = x264_preset
+    opts['upscale']['x264_lossless'] = x264_lossless
+    
+    outname = values['upscale_input_outputfilename']
+
+    shader(fn, width, height, shader_dir, bit, outname, gui=True, opts=opts)
+    UPSCALE_FINISHED = True
+
+
+    upscale_layout = 
         [sg.T('', font='any 1')],
         [sg.Text("Output file")],
         [sg.Input(key='upscale_input_outputfilename', enable_events=True, readonly=False)],
