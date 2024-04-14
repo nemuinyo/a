@@ -13,8 +13,8 @@ ThinLines_HQ = "Anime4K_Thin_HQ.glsl"
 Deblur_DoG = "Anime4K_Deblur_DoG.glsl"
 
 Upscale_CNN_M_x2_Deblur = "Anime4K_Deblur_Original.glsl"
-Upscale_CNN_L_x2_Deblur = "Anime4K_Restore_CNN_L.glsl"
-Upscale_CNN_UL_x2_Deblur = "Anime4K_Restore_CNN_UL.glsl"
+Upscale_CNN_L_x2_Deblur = "Anime4K_Deblur_Original.glsl"
+Upscale_CNN_UL_x2_Deblur = "Anime4K_Deblur_Original.glsll"
 
 Upscale_CNN_M_x2_Denoise = "Anime4K_Upscale_Denoise_CNN_x2_M.glsl"
 Upscale_CNN_L_x2_Denoise = "Anime4K_Upscale_Denoise_CNN_x2_L.glsl"

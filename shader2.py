@@ -81,8 +81,8 @@ def FHDMenu(shader_dir):
     elif quality_choice == 1:
         if mode_choice == 0:
             s = os.path.join(shader_dir, Denoise_Bilateral)
-            #s = s + ":"
-            #s = s + os.path.join(shader_dir, Upscale_CNN_L_x2_Deblur)
+            s = s + ":"
+            s = s + os.path.join(shader_dir, Upscale_CNN_L_x2_Deblur)
             return s
         elif mode_choice == 1:
             s = os.path.join(shader_dir, Denoise_Bilateral)
