@@ -8,8 +8,7 @@ from torch.nn import functional as F
 import warnings
 import _thread
 import skvideo.io
-skvideo.setFFmpegPath(r"/usr/local/bin/ffmpeg")
-skvideo.setFFprobePath(r"/usr/local/bin/ffprobe")
+skvideo.setFFmpegPath(r"/usr/local/bin")
 from queue import Queue, Empty
 from model.pytorch_msssim import ssim_matlab
 
