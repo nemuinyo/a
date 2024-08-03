@@ -114,7 +114,7 @@ if not args.video is None:
     videogen = skvideo.io.vreader(args.video)
     lastframe = next(videogen)
 #    fourcc = cv2.VideoWriter_fourcc('m', 'p', '4', 'v')
-    fourcc = cv2.VideoWriter_fourcc(*'avc1')
+    fourcc = cv2.VideoWriter_fourcc('H', 'E', 'V','C')
 #    fourcc = cv2.VideoWriter_fourcc('X', 'V', 'I','D')
     video_path_wo_ext, ext = os.path.splitext(args.video)
     print('{}.{}, {} frames in total, {}FPS to {}FPS'.format(video_path_wo_ext, args.ext, tot_frame, fps, args.fps))
