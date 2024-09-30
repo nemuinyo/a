@@ -1,4 +1,4 @@
-cupy-cuda11x
+cupy-cuda12x
 matplotlib
 moviepy
 numpy
