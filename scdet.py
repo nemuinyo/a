@@ -236,15 +236,15 @@ class SvfiTransitionDetection(TransitionDetectionHSV):
         super().__init__(scene_queue_length=scene_queue_length,
                          scdet_threshold=scdet_threshold, pure_scene_threshold=pure_scene_threshold,
                          no_scdet=no_scdet, use_fixed_scdet=use_fixed_scdet, fixed_max_scdet=fixed_max_scdet)
-        from scdet.utils import Tools
-        from scdet.StaticParameters import RGB_TYPE
-        self.utils = Tools  # static
-        self.scene_dir = os.path.join(project_dir, "scene")  # save dir path
-        if not os.path.exists(self.scene_dir):
-            os.mkdir(self.scene_dir)
-        self.scene_stack = Queue(maxsize=scene_queue_length)
-        self.scdet_output = scdet_output
-        self.rgb_size = RGB_TYPE.SIZE
+#        from scdet.utils import Tools
+#        from scdet.StaticParameters import RGB_TYPE
+#        self.utils = Tools  # static
+#        self.scene_dir = os.path.join(project_dir, "scene")  # save dir path
+#        if not os.path.exists(self.scene_dir):
+#            os.mkdir(self.scene_dir)
+#        self.scene_stack = Queue(maxsize=scene_queue_length)
+#        self.scdet_output = scdet_output
+#        self.rgb_size = RGB_TYPE.SIZE
 
     def save_scene(self, title):
         if not self.scdet_output:
