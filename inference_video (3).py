@@ -113,15 +113,17 @@ else:
         '-i', 'pipe:0',          # 映像はstdinから
         '-an',                    # 音声なし（後で結合）
         '-vcodec', 'hevc_nvenc',
-        '-gpu', '1',             # GPU1でエンコード（GPU0はRIFE推論専用）
         '-qp', str(args.qp),
         '-preset', args.preset,
         '-pix_fmt', 'yuv420p',
         '-tag:v', 'hvc1',        # Apple互換タグ
         vid_out_name
     ]
-    ffmpeg_proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
-    print("ffmpeg process started: {}".format(' '.join(ffmpeg_cmd)))
+    # CUDA_VISIBLE_DEVICES=1 でffmpegプロセスをGPU1に強制割り当て
+    ffmpeg_env = os.environ.copy()
+    ffmpeg_env['CUDA_VISIBLE_DEVICES'] = '1'
+    ffmpeg_proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, env=ffmpeg_env)
+    print("ffmpeg process started on GPU1: {}".format(' '.join(ffmpeg_cmd)))
 
 
 def clear_write_buffer(user_args, write_buffer):
