@@ -29,7 +29,7 @@ parser.add_argument('--png', dest='png', action='store_true', help='whether to v
 parser.add_argument('--ext', dest='ext', type=str, default='mp4', help='vid_out video extension')
 parser.add_argument('--exp', dest='exp', type=int, default=1)
 parser.add_argument('--multi', dest='multi', type=int, default=2)
-parser.add_argument('--qp', dest='qp', type=int, default=18, help='hevc_nvenc QP quality (0=lossless, 51=worst, default=18)')
+parser.add_argument('--cq', dest='cq', type=int, default=18, help='hevc_nvenc CQ quality (0=lossless, 51=worst, default=18)')
 parser.add_argument('--preset', dest='preset', type=str, default='p4', help='hevc_nvenc preset (p1=fastest, p7=slowest, default=p4)')
 
 args = parser.parse_args()
@@ -113,7 +113,9 @@ else:
         '-i', 'pipe:0',          # 映像はstdinから
         '-an',                    # 音声なし（後で結合）
         '-vcodec', 'hevc_nvenc',
-        '-qp', str(args.qp),
+        '-rc', 'vbr',            # VBRモード（CQ使用に必要）
+        '-cq', str(args.cq),
+        '-maxrate', '0',         # ビットレート上限なし
         '-preset', args.preset,
         '-pix_fmt', 'yuv420p',
         '-tag:v', 'hvc1',        # Apple互換タグ
