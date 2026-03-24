@@ -3,6 +3,11 @@ import cv2
 import torch
 import argparse
 import numpy as np
+
+# --- NumPy 互換パッチ: 古いライブラリが np.float を参照する問題を回避 ---
+if not hasattr(np, 'float'):
+    np.float = float
+
 from tqdm import tqdm
 from torch.nn import functional as F
 import warnings
@@ -10,8 +15,6 @@ import _thread
 import skvideo.io
 from queue import Queue, Empty
 from model.pytorch_msssim import ssim_matlab
-import subprocess
-import time
 
 warnings.filterwarnings("ignore")
 
@@ -129,85 +132,29 @@ else:
     lastframe = cv2.imread(os.path.join(args.img, videogen[0]), cv2.IMREAD_UNCHANGED)[:, :, ::-1].copy()
     videogen = videogen[1:]
 h, w, _ = lastframe.shape
-
-# prepare output filename
-if args.output is not None:
-    vid_out_name = args.output
-else:
-    if not args.video is None:
-        video_path_wo_ext = os.path.splitext(args.video)[0]
-    else:
-        video_path_wo_ext = "out"
-    vid_out_name = '{}_{}X_{}fps.{}'.format(video_path_wo_ext, args.multi, int(np.round(args.fps)), args.ext)
-
-# ffmpeg process (None if png mode)
-ffmpeg_proc = None
-if not args.png:
-    # We assume frames in write_buffer are RGB (H,W,3) as in original code (transpose used)
-    ffmpeg_cmd = [
-        'ffmpeg', '-y',
-        '-f', 'rawvideo',
-        '-pix_fmt', 'rgb24',
-        '-s', f'{w}x{h}',
-        '-r', str(int(np.round(args.fps))),
-        '-i', '-',
-        '-c:v', 'libx264',
-        '-preset', 'veryfast',
-        '-crf', '18',
-        '-pix_fmt', 'yuv420p',
-        vid_out_name
-    ]
-    try:
-        ffmpeg_proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=10**8)
-    except Exception as e:
-        print("Failed to start ffmpeg, falling back to cv2.VideoWriter. Error:", e)
-        ffmpeg_proc = None
-
-# create vid_out directory for pngs if needed
+vid_out_name = None
+vid_out = None
 if args.png:
     if not os.path.exists('vid_out'):
         os.mkdir('vid_out')
+else:
+    if args.output is not None:
+        vid_out_name = args.output
+    else:
+        vid_out_name = '{}_{}X_{}fps.{}'.format(video_path_wo_ext, args.multi, int(np.round(args.fps)), args.ext)
+    vid_out = cv2.VideoWriter(vid_out_name, fourcc, args.fps, (w, h))
 
-def clear_write_buffer(user_args, write_buffer, ffmpeg_proc=None):
+def clear_write_buffer(user_args, write_buffer):
     cnt = 0
     while True:
         item = write_buffer.get()
         if item is None:
             break
         if user_args.png:
-            # item is RGB; cv2.imwrite expects BGR
             cv2.imwrite('vid_out/{:0>7d}.png'.format(cnt), item[:, :, ::-1])
             cnt += 1
         else:
-            if ffmpeg_proc is not None and ffmpeg_proc.stdin:
-                try:
-                    # item is RGB (H,W,3), pix_fmt=rgb24
-                    ffmpeg_proc.stdin.write(item.tobytes())
-                except BrokenPipeError:
-                    # ffmpeg died; stop writing
-                    break
-                except Exception as e:
-                    print("Error writing to ffmpeg stdin:", e)
-                    break
-            else:
-                # fallback: try to write using cv2.VideoWriter if available
-                try:
-                    # convert RGB to BGR for cv2
-                    if 'vid_out_cv2' in globals() and vid_out_cv2 is not None:
-                        vid_out_cv2.write(item[:, :, ::-1])
-                except Exception:
-                    break
-    # close ffmpeg stdin and wait for process to finish
-    if ffmpeg_proc is not None:
-        try:
-            if ffmpeg_proc.stdin:
-                ffmpeg_proc.stdin.close()
-        except:
-            pass
-        try:
-            ffmpeg_proc.wait()
-        except:
-            pass
+            vid_out.write(item[:, :, ::-1])
 
 def build_read_buffer(user_args, read_buffer, videogen):
     try:
@@ -257,19 +204,8 @@ if args.montage:
     lastframe = lastframe[:, left: left + w]
 write_buffer = Queue(maxsize=500)
 read_buffer = Queue(maxsize=500)
-
-# If ffmpeg failed to start and we are not in png mode, fallback to cv2.VideoWriter
-vid_out_cv2 = None
-if not args.png and ffmpeg_proc is None:
-    try:
-        fourcc = cv2.VideoWriter_fourcc('m', 'p', '4', 'v')
-        vid_out_cv2 = cv2.VideoWriter(vid_out_name, fourcc, args.fps, (w, h))
-    except Exception as e:
-        print("Failed to create cv2.VideoWriter fallback:", e)
-        vid_out_cv2 = None
-
 _thread.start_new_thread(build_read_buffer, (args, read_buffer, videogen))
-_thread.start_new_thread(clear_write_buffer, (args, write_buffer, ffmpeg_proc))
+_thread.start_new_thread(clear_write_buffer, (args, write_buffer))
 
 I1 = torch.from_numpy(np.transpose(lastframe, (2,0,1))).to(device, non_blocking=True).unsqueeze(0).float() / 255.
 I1 = pad_image(I1)
@@ -309,6 +245,15 @@ while True:
         output = []
         for i in range(args.multi - 1):
             output.append(I0)
+        '''
+        output = []
+        step = 1 / args.multi
+        alpha = 0
+        for i in range(args.multi - 1):
+            alpha += step
+            beta = 1-alpha
+            output.append(torch.from_numpy(np.transpose((cv2.addWeighted(frame[:, :, ::-1], alpha, lastframe[:, :, ::-1], beta, 0)[:, :, ::-1].copy()), (2,0,1))).to(device, non_blocking=True).unsqueeze(0).float() / 255.)
+        '''
     else:
         output = make_inference(I0, I1, args.multi - 1)
 
@@ -333,26 +278,18 @@ else:
     write_buffer.put(lastframe)
 write_buffer.put(None)
 
-# wait until writer finishes consuming buffer
+import time
 while(not write_buffer.empty()):
     time.sleep(0.1)
 pbar.close()
-
-# release cv2 fallback if used
-if 'vid_out_cv2' in globals() and vid_out_cv2 is not None:
-    try:
-        vid_out_cv2.release()
-    except:
-        pass
+if not vid_out is None:
+    vid_out.release()
 
 # move audio to new video file if appropriate
 if args.png == False and fpsNotAssigned == True and not args.video is None:
     try:
         transferAudio(args.video, vid_out_name)
-    except Exception as e:
-        print("Audio transfer failed. Interpolated video will have no audio. Error:", e)
+    except:
+        print("Audio transfer failed. Interpolated video will have no audio")
         targetNoAudio = os.path.splitext(vid_out_name)[0] + "_noaudio" + os.path.splitext(vid_out_name)[1]
-        try:
-            os.rename(targetNoAudio, vid_out_name)
-        except:
-            pass
+        os.rename(targetNoAudio, vid_out_name)
