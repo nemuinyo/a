@@ -167,4 +167,4 @@ if __name__ == "__main__":
         OUTPUT_VIDEO
     ], check=True)
 
-    print(f"✅ 完成: {OUTPUT_VIDEO}  ({(time.time()-start)/60:.1f}分)")
+    print(f"✅ 成: {OUTPUT_VIDEO}  ({(time.time()-start)/60:.1f}分)")
