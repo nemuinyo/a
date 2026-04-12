@@ -4,8 +4,10 @@ import cv2
 import sys
 import time
 
-sys.path.insert(0, "/kaggle/working/Practical-RIFE/train_log")  # ← train_log に変更
-from RIFE_HDv3 import Model  # ← model. を外す
+sys.path.insert(0, "/kaggle/working/Practical-RIFE/train_log")
+sys.path.insert(0, "/kaggle/working/Practical-RIFE/model")
+
+from RIFE_HDv3 import Model
 
 INPUT_VIDEO  = "/kaggle/input/your-dataset/anime.mp4"
 OUTPUT_VIDEO = "/kaggle/working/output.mp4"
