@@ -33,7 +33,7 @@ ffmpeg_cmd = [
     "-s", f"{width}x{height}",
     "-r", str(src_fps * multi),
     "-i", "pipe:0",
-    "-c:v", "ffv1",        # ← lossless codec、ここが肝
+    "-c:v", "ffv1",        # ← lossless codec、ここ肝
     TMP_OUTPUT
 ]
 pipe = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
@@ -58,7 +58,7 @@ for i in range(total - 1):
     I0 = frame_to_tensor(prev)
     I1 = frame_to_tensor(curr)
 
-    # シーンチェンジ検出
+    # ーンチェン検出
     diff = (I0 - I1).abs().mean().item()
     scene_change = diff > 0.4
 
@@ -74,7 +74,7 @@ for i in range(total - 1):
         pipe.stdin.write(m2.tobytes())
         pipe.stdin.write(m3.tobytes())
     else:
-        # シーンチェンジはフレームコピーで埋める
+        # ーンチェンはフレームコピーで埋める
         pipe.stdin.write(prev.tobytes())
         pipe.stdin.write(prev.tobytes())
         pipe.stdin.write(prev.tobytes())
