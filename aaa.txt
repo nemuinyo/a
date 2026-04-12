@@ -3,11 +3,23 @@ import subprocess
 import cv2
 import sys
 import time
+import importlib.util
 
-sys.path.insert(0, "/kaggle/working/Practical-RIFE/train_log")
+def load_module(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod  = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+base = "/kaggle/working/Practical-RIFE/train_log"
+sys.path.insert(0, base)
 sys.path.insert(0, "/kaggle/working/Practical-RIFE/model")
 
-from RIFE_HDv3 import Model
+load_module("refine",     f"{base}/refine.py")
+load_module("IFNet_HDv3", f"{base}/IFNet_HDv3.py")
+RIFE = load_module("RIFE_HDv3", f"{base}/RIFE_HDv3.py")
+Model = RIFE.Model
 
 INPUT_VIDEO  = "/kaggle/input/your-dataset/anime.mp4"
 OUTPUT_VIDEO = "/kaggle/working/output.mp4"
@@ -17,7 +29,7 @@ MULTI        = 4
 
 device = torch.device("cuda")
 model = Model()
-model.load_model("/kaggle/working/Practical-RIFE/train_log", -1)
+model.load_model(base, -1)
 model.eval()
 model.device()
 
