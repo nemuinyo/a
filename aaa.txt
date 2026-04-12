@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import subprocess
 import cv2
 import sys
@@ -23,7 +24,7 @@ load_module("IFNet_HDv3", f"{train_log}/IFNet_HDv3.py")
 RIFE  = load_module("RIFE_HDv3", f"{train_log}/RIFE_HDv3.py")
 Model = RIFE.Model
 
-INPUT_VIDEO  = "/kaggle/working/aaa.mkv"
+INPUT_VIDEO  = "/kaggle/input/your-dataset/anime.mp4"
 OUTPUT_VIDEO = "/kaggle/working/output.mp4"
 TMP_OUTPUT   = "/kaggle/working/tmp_lossless.mkv"
 SRC_FPS      = 24
@@ -40,6 +41,21 @@ width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 total  = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
+# 32の倍数にパディング
+pad_h = (32 - height % 32) % 32
+pad_w = (32 - width  % 32) % 32
+
+def to_tensor(frame):
+    t = torch.from_numpy(frame).permute(2,0,1).float().div(255.).unsqueeze(0).to(device)
+    if pad_h or pad_w:
+        t = F.pad(t, (0, pad_w, 0, pad_h))
+    return t
+
+def to_frame(t):
+    # パディング分をクロップして元サイズに戻す
+    t = t[:, :, :height, :width]
+    return (t.squeeze(0).permute(1,2,0).clamp(0,1).mul(255.).byte().cpu().numpy())
+
 ffmpeg_cmd = [
     "ffmpeg", "-y",
     "-f", "rawvideo",
@@ -51,12 +67,6 @@ ffmpeg_cmd = [
     TMP_OUTPUT
 ]
 pipe = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
-
-def to_tensor(frame):
-    return torch.from_numpy(frame).permute(2,0,1).float().div(255.).unsqueeze(0).to(device)
-
-def to_frame(t):
-    return (t.squeeze(0).permute(1,2,0).clamp(0,1).mul(255.).byte().cpu().numpy())
 
 ret, prev = cap.read()
 prev = cv2.cvtColor(prev, cv2.COLOR_BGR2RGB)
