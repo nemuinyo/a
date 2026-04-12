@@ -6,7 +6,6 @@ import sys
 import time
 import importlib.util
 import multiprocessing as mp
-import os
 
 def load_module(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
@@ -18,6 +17,7 @@ def load_module(name, path):
 def process_segment(gpu_id, start_frame, end_frame, input_video, output_path, train_log, model_dir):
     import torch
     import torch.nn.functional as F
+    import subprocess
     import cv2
     import sys
     import importlib.util
@@ -44,7 +44,7 @@ def process_segment(gpu_id, start_frame, end_frame, input_video, output_path, tr
     model.flownet.half()
     model.flownet.to(device)
 
-    cap = cv2.VideoCapture(input_video)
+    cap    = cv2.VideoCapture(input_video)
     width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     SRC_FPS = 24
@@ -63,7 +63,6 @@ def process_segment(gpu_id, start_frame, end_frame, input_video, output_path, tr
         t = t[:, :, :height, :width]
         return (t.squeeze(0).permute(1,2,0).clamp(0,1).mul(255.).byte().cpu().numpy())
 
-    # 開始フレームまでシーク
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
     ffmpeg_cmd = [
@@ -78,8 +77,12 @@ def process_segment(gpu_id, start_frame, end_frame, input_video, output_path, tr
     ]
     pipe = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
 
-    import subprocess
     ret, prev = cap.read()
+    if not ret:
+        pipe.stdin.close()
+        pipe.wait()
+        cap.release()
+        return
     prev = cv2.cvtColor(prev, cv2.COLOR_BGR2RGB)
     total_seg = end_frame - start_frame
 
@@ -116,11 +119,10 @@ def process_segment(gpu_id, start_frame, end_frame, input_video, output_path, tr
     pipe.stdin.close()
     pipe.wait()
     cap.release()
-    print(f"✅ GPU{gpu_id} 完了")
+    print(f"✅ GPU{gpu_id} 完了", flush=True)
+
 
 if __name__ == "__main__":
-    import subprocess
-
     INPUT_VIDEO  = "/kaggle/input/your-dataset/anime.mp4"
     OUTPUT_VIDEO = "/kaggle/working/output.mp4"
     TMP0         = "/kaggle/working/tmp_gpu0.mkv"
@@ -137,7 +139,6 @@ if __name__ == "__main__":
     print(f"総フレーム数: {total}  分割点: {mid}")
     start = time.time()
 
-    # 2プロセスで並列実行
     p0 = mp.Process(target=process_segment, args=(0, 0,   mid,   INPUT_VIDEO, TMP0, train_log, model_dir))
     p1 = mp.Process(target=process_segment, args=(1, mid, total, INPUT_VIDEO, TMP1, train_log, model_dir))
     p0.start(); p1.start()
@@ -145,7 +146,6 @@ if __name__ == "__main__":
 
     print(f"⏱ 補間完了: {(time.time()-start)/60:.1f}分")
 
-    # 結合
     with open("/kaggle/working/concat.txt", "w") as f:
         f.write(f"file '{TMP0}'\nfile '{TMP1}'\n")
 
@@ -155,7 +155,6 @@ if __name__ == "__main__":
         "-c", "copy", TMP_CONCAT
     ], check=True)
 
-    # 音声合成 + 60fps
     subprocess.run([
         "ffmpeg", "-y",
         "-i", TMP_CONCAT,
@@ -167,4 +166,4 @@ if __name__ == "__main__":
         OUTPUT_VIDEO
     ], check=True)
 
-    print(f"✅ 成: {OUTPUT_VIDEO}  ({(time.time()-start)/60:.1f}分)")
+    print(f"✅ : {OUTPUT_VIDEO}  ({(time.time()-start)/60:.1f}分)")
