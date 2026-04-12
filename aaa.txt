@@ -24,7 +24,7 @@ load_module("IFNet_HDv3", f"{train_log}/IFNet_HDv3.py")
 RIFE  = load_module("RIFE_HDv3", f"{train_log}/RIFE_HDv3.py")
 Model = RIFE.Model
 
-INPUT_VIDEO  = "/kaggle/input/your-dataset/anime.mp4"
+INPUT_VIDEO  = "/kaggle/working/aaa.mkv"
 OUTPUT_VIDEO = "/kaggle/working/output.mp4"
 TMP_OUTPUT   = "/kaggle/working/tmp_lossless.mkv"
 SRC_FPS      = 24
