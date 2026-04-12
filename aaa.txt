@@ -96,7 +96,7 @@ pipe.stdin.write(prev.tobytes())
 pipe.stdin.close()
 pipe.wait()
 cap.release()
-print(f"✅ lossless完成: {(time.time()-start)/60:.1f}分")
+print(f"✅ lossless: {(time.time()-start)/60:.1f}分")
 
 subprocess.run([
     "ffmpeg", "-y",
@@ -109,4 +109,4 @@ subprocess.run([
     "-c:a", "copy",
     OUTPUT_VIDEO
 ], check=True)
-print(f"✅ 完成: {OUTPUT_VIDEO}")
+print(f"✅ 成: {OUTPUT_VIDEO}")
