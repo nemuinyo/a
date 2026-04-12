@@ -12,8 +12,8 @@ def load_module(name, path):
     spec.loader.exec_module(mod)
     return mod
 
-train_log = "/kaggle/working/Practical-RIFE/train_log"
-model_dir = "/kaggle/working/Practical-RIFE/model"
+train_log = "/kaggle/working/train_log"
+model_dir = "/kaggle/working/model"
 sys.path.insert(0, train_log)
 sys.path.insert(0, model_dir)
 
@@ -23,7 +23,7 @@ load_module("IFNet_HDv3", f"{train_log}/IFNet_HDv3.py")
 RIFE  = load_module("RIFE_HDv3", f"{train_log}/RIFE_HDv3.py")
 Model = RIFE.Model
 
-INPUT_VIDEO  = "/kaggle/input/your-dataset/anime.mp4"
+INPUT_VIDEO  = "/kaggle/working/aaa.mkv"
 OUTPUT_VIDEO = "/kaggle/working/output.mp4"
 TMP_OUTPUT   = "/kaggle/working/tmp_lossless.mkv"
 SRC_FPS      = 24
