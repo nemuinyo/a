@@ -22,6 +22,10 @@ def process_segment(gpu_id, start_frame, end_frame, input_video, output_path, tr
     import sys
     import importlib.util
 
+    # spawnで独立プロセスになるのでCUDAを最初に初期化
+    torch.cuda.set_device(gpu_id)
+    device = torch.device(f"cuda:{gpu_id}")
+
     def load_module(name, path):
         spec = importlib.util.spec_from_file_location(name, path)
         mod  = importlib.util.module_from_spec(spec)
@@ -37,12 +41,10 @@ def process_segment(gpu_id, start_frame, end_frame, input_video, output_path, tr
     RIFE  = load_module("RIFE_HDv3", f"{train_log}/RIFE_HDv3.py")
     Model = RIFE.Model
 
-    device = torch.device(f"cuda:{gpu_id}")
     model = Model()
     model.load_model(train_log, -1)
     model.eval()
-    model.flownet.half()
-    model.flownet.to(device)
+    model.flownet.half().to(device)
 
     cap    = cv2.VideoCapture(input_video)
     width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -63,42 +65,51 @@ def process_segment(gpu_id, start_frame, end_frame, input_video, output_path, tr
         t = t[:, :, :height, :width]
         return (t.squeeze(0).permute(1,2,0).clamp(0,1).mul(255.).byte().cpu().numpy())
 
+    # warplayerのグリッドをhalf+同デバイスに合わせるパッチ
+    import sys as _sys
+    warplayer = _sys.modules["warplayer"]
+    _orig_warp = warplayer.warp
+    def _patched_warp(tenInput, tenFlow):
+        backwarp_tenGrid = warplayer.backwarp_tenGrid
+        k = str(tenFlow.shape)
+        if k not in backwarp_tenGrid:
+            tenHor = torch.linspace(-1, 1, tenFlow.shape[3]).view(1,1,1,-1).expand(1,1,tenFlow.shape[2],-1)
+            tenVer = torch.linspace(-1, 1, tenFlow.shape[2]).view(1,1,-1,1).expand(1,1,-1,tenFlow.shape[3])
+            backwarp_tenGrid[k] = torch.cat([tenHor, tenVer], 1).to(device)
+        g = (backwarp_tenGrid[k].to(tenFlow) + tenFlow).permute(0,2,3,1)
+        return torch.nn.functional.grid_sample(
+            input=tenInput, grid=g,
+            mode='bilinear', padding_mode='border', align_corners=True)
+    warplayer.warp = _patched_warp
+
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
     ffmpeg_cmd = [
         "ffmpeg", "-y",
-        "-f", "rawvideo",
-        "-pix_fmt", "rgb24",
+        "-f", "rawvideo", "-pix_fmt", "rgb24",
         "-s", f"{width}x{height}",
         "-r", str(SRC_FPS * MULTI),
         "-i", "pipe:0",
-        "-c:v", "ffv1",
-        output_path
+        "-c:v", "ffv1", output_path
     ]
     pipe = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
 
     ret, prev = cap.read()
     if not ret:
-        pipe.stdin.close()
-        pipe.wait()
-        cap.release()
-        return
+        pipe.stdin.close(); pipe.wait(); cap.release(); return
     prev = cv2.cvtColor(prev, cv2.COLOR_BGR2RGB)
     total_seg = end_frame - start_frame
 
     for i in range(total_seg - 1):
         ret, curr = cap.read()
-        if not ret:
-            break
+        if not ret: break
         curr = cv2.cvtColor(curr, cv2.COLOR_BGR2RGB)
 
         I0 = to_tensor(prev)
         I1 = to_tensor(curr)
-
         scene_change = (I0 - I1).abs().mean().item() > 0.4
 
         pipe.stdin.write(prev.tobytes())
-
         if not scene_change:
             with torch.no_grad():
                 m1 = to_frame(model.inference(I0, I1, timestep=0.25))
@@ -123,6 +134,8 @@ def process_segment(gpu_id, start_frame, end_frame, input_video, output_path, tr
 
 
 if __name__ == "__main__":
+    mp.set_start_method("spawn", force=True)  # ← 真の並列化
+
     INPUT_VIDEO  = "/kaggle/input/your-dataset/anime.mp4"
     OUTPUT_VIDEO = "/kaggle/working/output.mp4"
     TMP0         = "/kaggle/working/tmp_gpu0.mkv"
@@ -135,7 +148,6 @@ if __name__ == "__main__":
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     cap.release()
     mid = total // 2
-
     print(f"総フレーム数: {total}  分割点: {mid}")
     start = time.time()
 
@@ -157,8 +169,7 @@ if __name__ == "__main__":
 
     subprocess.run([
         "ffmpeg", "-y",
-        "-i", TMP_CONCAT,
-        "-i", INPUT_VIDEO,
+        "-i", TMP_CONCAT, "-i", INPUT_VIDEO,
         "-map", "0:v", "-map", "1:a",
         "-vf", "fps=60",
         "-c:v", "libx264", "-crf", "16", "-preset", "slow",
@@ -166,4 +177,4 @@ if __name__ == "__main__":
         OUTPUT_VIDEO
     ], check=True)
 
-    print(f"✅ : {OUTPUT_VIDEO}  ({(time.time()-start)/60:.1f}分)")
+    print(f"✅ 成: {OUTPUT_VIDEO}  ({(time.time()-start)/60:.1f}分)")
