@@ -12,13 +12,15 @@ def load_module(name, path):
     spec.loader.exec_module(mod)
     return mod
 
-base = "/kaggle/working/Practical-RIFE/train_log"
-sys.path.insert(0, base)
-sys.path.insert(0, "/kaggle/working/Practical-RIFE/model")
+train_log = "/kaggle/working/Practical-RIFE/train_log"
+model_dir = "/kaggle/working/Practical-RIFE/model"
+sys.path.insert(0, train_log)
+sys.path.insert(0, model_dir)
 
-load_module("refine",     f"{base}/refine.py")
-load_module("IFNet_HDv3", f"{base}/IFNet_HDv3.py")
-RIFE = load_module("RIFE_HDv3", f"{base}/RIFE_HDv3.py")
+load_module("refine",     f"{model_dir}/refine.py")       # ← model_dir
+load_module("warplayer",  f"{model_dir}/warplayer.py")    # ← model_dir
+load_module("IFNet_HDv3", f"{train_log}/IFNet_HDv3.py")
+RIFE  = load_module("RIFE_HDv3", f"{train_log}/RIFE_HDv3.py")
 Model = RIFE.Model
 
 INPUT_VIDEO  = "/kaggle/input/your-dataset/anime.mp4"
@@ -29,7 +31,7 @@ MULTI        = 4
 
 device = torch.device("cuda")
 model = Model()
-model.load_model(base, -1)
+model.load_model(train_log, -1)
 model.eval()
 model.device()
 
