@@ -6,6 +6,7 @@ import json
 import time
 import shutil
 import argparse
+import inspect
 import warnings
 import traceback
 import subprocess
@@ -17,12 +18,14 @@ from queue import Empty, Queue
 import cv2
 import numpy as np
 import torch
-import torch.nn.functional as F  # ※テンソル変数名とは別物。ワーカー内ではFcを使用
+import torch.nn.functional as F  # ローカル変数にFを使わないこと(過去バグの教訓)
 from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
 from model.pytorch_msssim import ssim_matlab
 
+
+# ---------------- ffprobe / ハードウェア検出 ----------------
 
 def ffprobe_meta(path):
     cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
@@ -39,14 +42,56 @@ def ffprobe_meta(path):
     return int(st['width']), int(st['height']), fps, audio
 
 
+def probe_nvenc():
+    """h264_nvenc が実際に使えるかテストエンコードで確認"""
+    try:
+        r = subprocess.run(
+            ['ffmpeg', '-v', 'error', '-nostdin', '-f', 'lavfi', '-i', 'color=c=black:s=256x256:d=0.2:r=30',
+             '-c:v', 'h264_nvenc', '-preset', 'p4', '-rc', 'vbr', '-cq', '19', '-b:v', '0',
+             '-pix_fmt', 'yuv420p', '-f', 'null', '-'],
+            stderr=subprocess.DEVNULL, timeout=60)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def probe_nvdec():
+    """-hwaccel cuda でのデコードが実際に通るか確認"""
+    tmp = '/tmp/rife_nvdec_probe.mp4'
+    try:
+        r = subprocess.run(['ffmpeg', '-v', 'error', '-y', '-nostdin', '-f', 'lavfi',
+                            '-i', 'testsrc2=s=256x256:d=0.5:r=30', '-c:v', 'libx264',
+                            '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', tmp],
+                           stderr=subprocess.DEVNULL, timeout=60)
+        if r.returncode != 0:
+            return False
+        p = subprocess.Popen(['ffmpeg', '-v', 'error', '-nostdin', '-hwaccel', 'cuda', '-i', tmp,
+                              '-map', '0:v:0', '-f', 'rawvideo', '-pix_fmt', 'bgr24', '-'],
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        data = p.stdout.read()
+        p.wait(timeout=30)
+        return len(data) == 15 * 256 * 256 * 3
+    except Exception:
+        return False
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+# ---------------- フレーム読み込み ----------------
+
 class VideoFrames:
-    def __init__(self, path, h, w_full, start_idx, fps):
+    """trim=start_frame でフレーム番号指定(VFR/start_timeオフセットの影響を受けない)"""
+    def __init__(self, path, h, w_full, start_frame, nvdec):
         self.h, self.w = h, w_full
         self.frame_bytes = h * w_full * 3
         cmd = ['ffmpeg', '-v', 'error', '-nostdin', '-threads', '1']
-        if start_idx > 0:
-            cmd += ['-ss', '%.6f' % max(0.0, (start_idx - 0.5) / float(fps))]
-        cmd += ['-i', path, '-map', '0:v:0', '-f', 'rawvideo', '-pix_fmt', 'bgr24', '-']
+        if nvdec:
+            cmd += ['-hwaccel', 'cuda']
+        cmd += ['-i', path, '-map', '0:v:0', '-vf', 'trim=start_frame=%d' % max(0, start_frame),
+                '-f', 'rawvideo', '-pix_fmt', 'bgr24', '-']
         self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
     def __iter__(self):
@@ -62,6 +107,13 @@ class VideoFrames:
                 got += r
             yield np.frombuffer(buf, dtype=np.uint8).reshape(self.h, self.w, 3)
 
+    def close(self):
+        try:
+            self.proc.stdout.close()
+            self.proc.terminate()
+        except Exception:
+            pass
+
 
 class ImageFrames:
     def __init__(self, paths):
@@ -73,8 +125,13 @@ class ImageFrames:
             if f is not None:
                 yield f
 
+    def close(self):
+        pass
 
-def _output_writer(outq, cfg, msg_q):
+
+# ---------------- セグメント書き出し(ワーカー毎スレッド) ----------------
+
+def _seg_writer(outq, cfg, msg_q):
     try:
         if cfg['png']:
             i = cfg['png_start']
@@ -86,15 +143,19 @@ def _output_writer(outq, cfg, msg_q):
                 i += 1
         else:
             fn, fd = cfg['ofps_frac']
-            fr = '%d/%d' % (fn * cfg['multi'], fd) if cfg['ofps_auto'] else '%d' % fn
-            enc = subprocess.Popen(
-                ['ffmpeg', '-v', 'error', '-y', '-nostdin',
-                 '-f', 'rawvideo', '-pix_fmt', 'bgr24', '-s', '%dx%d' % (cfg['ow'], cfg['h']),
-                 '-framerate', fr, '-i', '-',
-                 '-vf', 'pad=ceil(iw/2)*2:ceil(ih/2)*2',
-                 '-c:v', 'libx264', '-preset', cfg['preset'], '-crf', str(cfg['crf']),
-                 '-pix_fmt', 'yuv420p', '-threads', '1', '-r', fr, cfg['seg_path']],
-                stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            fr = '%d/%d' % (fn, fd)   # ★ ofps_frac には既に multi 反映済み。二重掛けしない(前バージョンのスピードバグ)
+            cmd = ['ffmpeg', '-v', 'error', '-y', '-nostdin',
+                   '-f', 'rawvideo', '-pix_fmt', 'bgr24', '-s', '%dx%d' % (cfg['ow'], cfg['h']),
+                   '-framerate', fr, '-i', '-',
+                   '-vf', 'pad=ceil(iw/2)*2:ceil(ih/2)*2', '-r', fr]
+            if cfg['nvenc']:
+                cmd += ['-c:v', 'h264_nvenc', '-preset', 'p4', '-rc', 'vbr',
+                        '-cq', str(cfg['crf']), '-b:v', '0', '-pix_fmt', 'yuv420p']
+            else:
+                cmd += ['-c:v', 'libx264', '-preset', cfg['preset'], '-crf', str(cfg['crf']),
+                        '-pix_fmt', 'yuv420p', '-threads', '1']
+            cmd += [cfg['seg_path']]
+            enc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
             while True:
                 img = outq.get()
                 if img is None:
@@ -104,11 +165,13 @@ def _output_writer(outq, cfg, msg_q):
                 enc.stdin.write(img.data)
             enc.stdin.close()
             if enc.wait() != 0:
-                raise RuntimeError('encoder failed')
+                raise RuntimeError('encoder failed: ' + cfg['seg_path'])
     except Exception:
         traceback.print_exc()
-        msg_q.put(('error', 'output writer failed'))
+        msg_q.put(('error', 'segment writer failed'))
 
+
+# ---------------- 推論ユーティリティ ----------------
 
 def make_inference(model, I0, I1, n, scale, ver):
     if n <= 0:
@@ -152,36 +215,45 @@ def is_oom(e):
     return isinstance(e, torch.cuda.OutOfMemoryError) or 'out of memory' in str(e).lower()
 
 
-def gpu_worker(gid, cfg, ops, first_iter, is_last, msg_q):
+# ---------------- GPU ワーカー ----------------
+
+def gpu_worker(gid, base_cfg, chunk_q, msg_q):
     tag = '[gpu%d]' % gid
     try:
         os.environ['CUDA_VISIBLE_DEVICES'] = str(gid)
         if os.getcwd() not in sys.path:
             sys.path.insert(0, os.getcwd())
         cv2.setNumThreads(1)
+        torch.set_num_threads(1)
         torch.set_grad_enabled(False)
         torch.backends.cudnn.benchmark = True
-        torch.set_num_threads(1)
         dev = torch.device('cuda')
-
-        outq = Queue(maxsize=64)
-        wt = threading.Thread(target=_output_writer, args=(outq, cfg, msg_q), daemon=True)
-        wt.start()
 
         from train_log.RIFE_HDv3 import Model
         model = Model()
         if not hasattr(model, 'version'):
             model.version = 0
-        model.load_model(cfg['model_dir'], -1)
-        print(tag + ' Loaded 3.x/4.x HD model.')
+        model.load_model(base_cfg['model_dir'], -1)
         model.eval()
         for name in list(vars(model)):
             o = getattr(model, name)
             if isinstance(o, torch.nn.Module):
                 o.to(dev)
         ver = getattr(model, 'version', 0)
+        # timestep非対応の古いIFNetなのに version 欠落だと旧再帰パスで破綻するため、
+        # 署名に timestep があれば 3.9 扱いにする(元コードの潜在バグ対策)
+        if ver < 3.9:
+            try:
+                if 'timestep' in inspect.signature(model.inference).parameters:
+                    ver = 3.9
+                    print(tag, 'timestep-capable inference detected -> version>=3.9')
+            except Exception:
+                pass
+        print(tag, 'model version:', ver)
 
-        h, w, padding, multi = cfg['h'], cfg['w'], tuple(cfg['padding']), cfg['multi']
+        h, w = base_cfg['h'], base_cfg['w']
+        padding = tuple(base_cfg['padding'])
+        montage, multi = base_cfg['montage'], base_cfg['multi']
         pin = torch.empty((h, w, 3), dtype=torch.uint8, pin_memory=True)
 
         def load(u8):
@@ -194,13 +266,59 @@ def gpu_worker(gid, cfg, ops, first_iter, is_last, msg_q):
             x = t[0, :, :h, :w].permute(1, 2, 0).float().mul_(255.).clamp_(0, 255).byte().flip(2)  # RGB→BGR
             return x.contiguous().cpu().numpy()
 
+        def ac():
+            return torch.autocast('cuda', dtype=torch.float16, enabled=amp_ok)
+
+        # ---- AMP 数値セルフチェック(砂嵐対策:破綻なら自動fp32) ----
+        amp_ok = not base_cfg['fp32']
+        if amp_ok:
+            g = torch.Generator().manual_seed(1234)
+            a = torch.rand((1, 3, 256, 256), generator=g).to(dev)
+            b = torch.rand((1, 3, 256, 256), generator=g).to(dev)
+            with torch.autocast('cuda', enabled=False):
+                r1 = infer_mid(model, a, b, 1.0, ver)
+            with torch.autocast('cuda', dtype=torch.float16):
+                r2 = infer_mid(model, a, b, 1.0, ver)
+            d = (r1.double() - r2.double()).abs().max().item()
+            if not np.isfinite(d) or d > 0.1:
+                amp_ok = False
+                print(tag, 'AMP self-check FAILED (maxdiff=%.4f) -> fp32 fallback' % d)
+            else:
+                print(tag, 'AMP self-check ok (maxdiff=%.5f)' % d)
+            del a, b, r1, r2
+
+        # ---- バッチ推論チェック(--batch>1時) ----
+        batch = base_cfg['batch']
+        if batch > 1 and ver >= 3.9:
+            try:
+                g = torch.Generator().manual_seed(7)
+                x = torch.rand((1, 3, 256, 256), generator=g).to(dev)
+                y = torch.rand((1, 3, 256, 256), generator=g).to(dev)
+                z = torch.rand((1, 3, 256, 256), generator=g).to(dev)
+                with ac():
+                    bat = model.inference(torch.cat([x, y]), torch.cat([y, z]), 0.5, 1.0)
+                with ac():
+                    s0 = model.inference(x, y, 0.5, 1.0)
+                    s1 = model.inference(y, z, 0.5, 1.0)
+                d = max((bat[0:1] - s0).abs().max().item(), (bat[1:2] - s1).abs().max().item())
+                if not np.isfinite(d) or d > 0.1:
+                    print(tag, 'batch check FAILED (maxdiff=%.4f) -> batch=1' % d)
+                    batch = 1
+                else:
+                    print(tag, 'batch check ok (maxdiff=%.5f)' % d)
+                del x, y, z, bat, s0, s1
+            except Exception as e:
+                print(tag, 'batch unsupported -> batch=1 :', repr(e))
+                batch = 1
+
+        # ---- 起動時メモリプローブ(OOMでscale自動低下) ----
         ph, pw = h + padding[3], w + padding[1]
         a = torch.zeros(1, 3, ph, pw, device=dev)
         b = torch.zeros_like(a)
-        sc = cfg['scale']
+        sc = base_cfg['scale']
         while True:
             try:
-                with torch.autocast('cuda', dtype=torch.float16, enabled=not cfg['fp32']):
+                with ac():
                     infer_mid(model, a, b, sc, ver)
                 break
             except Exception as e:
@@ -210,89 +328,132 @@ def gpu_worker(gid, cfg, ops, first_iter, is_last, msg_q):
                 torch.cuda.empty_cache()
         del a, b
         torch.cuda.empty_cache()
-        print(tag + ' ready (scale=%g)' % sc)
+        print(tag, 'ready (scale=%g, amp=%s, batch=%d)' % (sc, amp_ok, batch))
         msg_q.put(('ready',))
 
-        if cfg['mode'] == 'video':
-            fn, fd = cfg['fps_frac']
-            reader = VideoFrames(cfg['video_path'], h, cfg['w_full'], first_iter - 1, Fraction(fn, fd))
-        else:
-            reader = ImageFrames([os.path.join(cfg['img_dir'], f) for f in cfg['files'][first_iter - 1:]])
-        it = iter(reader)
-
-        def next_crop():
-            fr = next(it)
-            if cfg['left']:
-                fr = fr[:, cfg['left']:cfg['left'] + w]
-            return fr
-
-        state_img = next_crop()      # f_{first_iter-1}
-        Fc = load(state_img)         # ★ 改名: F モジュールとの衝突を解消
-        pending = None
-        M = len(ops)
-
-        def run_oom_safe(fn, sc):
+        def run_oom_safe(fn):
+            s = sc
             while True:
                 try:
-                    with torch.autocast('cuda', dtype=torch.float16, enabled=not cfg['fp32']):
-                        return fn(sc)
+                    with ac():
+                        return fn(s)
                 except Exception as e:
-                    if not is_oom(e) or sc <= 0.2501:
+                    if not is_oom(e) or s <= 0.2501:
                         raise
-                    sc = max(0.25, sc / 2)
+                    s = max(0.25, s / 2)
                     torch.cuda.empty_cache()
-                    print(tag + ' OOM -> scale=%g' % sc)
+                    print(tag, 'OOM -> scale=%g' % s)
 
-        for idx, kind in enumerate(ops):
-            fk_img = pending if pending is not None else next_crop()
+        # ---- チャンクループ(ダイナミック) ----
+        while True:
+            ch = chunk_q.get()
+            if ch is None:
+                return
+            t0 = time.time()
+            segcfg = dict(base_cfg)
+            segcfg['seg_path'] = ch['seg']
+            segcfg['png_start'] = ch['png_start']
+            outq = Queue(maxsize=64)
+            wt = threading.Thread(target=_seg_writer, args=(outq, segcfg, msg_q), daemon=True)
+            wt.start()
+
+            if base_cfg['mode'] == 'video':
+                reader = VideoFrames(base_cfg['video_path'], h, base_cfg['w_full'],
+                                     ch['first_iter'] - 1, base_cfg['nvdec'])
+            else:
+                reader = ImageFrames(base_cfg['img_paths'][ch['first_iter'] - 1:])
+            it = iter(reader)
+
+            def next_crop():
+                fr = next(it)
+                if base_cfg['left']:
+                    fr = fr[:, base_cfg['left']:base_cfg['left'] + w]
+                return fr
+
+            state_img = next_crop()
+            Fc = load(state_img)
             pending = None
-            base = np.concatenate((state_img, state_img), 1) if cfg['montage'] else state_img
-            outq.put(base)
+            ops = ch['ops']
+            i, M = 0, len(ops)
 
-            if kind == 'dup':
-                mids = [state_img] * (multi - 1)
-                state_img = fk_img
-                Fc = load(fk_img)
-            elif kind == 'pair':
-                Fk = load(fk_img)
-                outs = run_oom_safe(lambda s: make_inference(model, Fc, Fk, multi - 1, s, ver), sc)
-                mids = [img_from(o) for o in outs]
-                state_img = fk_img
-                Fc = Fk
-            elif kind == 'static':
-                nxt_img = next_crop()
-                Fnx = load(nxt_img)
-                D = run_oom_safe(lambda s: infer_mid(model, Fc, Fnx, s, ver), sc)
-                if gpu_ssim(Fc, D) < 0.2:
-                    mids = [state_img] * (multi - 1)
-                else:
-                    outs = run_oom_safe(lambda s: make_inference(model, Fc, D, multi - 1, s, ver), sc)
+            while i < M:
+                kind = ops[i]
+
+                # ---- 連続pairの一括バッチ推論 ----
+                if batch > 1 and ver >= 3.9 and pending is None and kind == 'pair':
+                    r, frs = 0, []
+                    while i + r < M and ops[i + r] == 'pair' and r < batch:
+                        frs.append(next_crop())
+                        r += 1
+                    Ts = [load(x) for x in frs]
+                    I0 = torch.cat([Fc] + Ts[:-1], 0)
+                    I1 = torch.cat(Ts, 0)
+                    outs = run_oom_safe(lambda s: model.inference(I0, I1, 0.5, s))
+                    for j in range(r):
+                        left_img = state_img
+                        outq.put(np.concatenate((left_img, left_img), 1) if montage else left_img)
+                        m = img_from(outs[j:j + 1])
+                        outq.put(np.concatenate((left_img, m), 1) if montage else m)
+                        state_img = frs[j]
+                        Fc = Ts[j]
+                    i += r
+                    msg_q.put(('prog', r))
+                    continue
+
+                fk_img = pending if pending is not None else next_crop()
+                pending = None
+                left_img = state_img
+                outq.put(np.concatenate((left_img, left_img), 1) if montage else left_img)
+
+                if kind == 'dup':
+                    mids = [left_img]
+                    state_img = fk_img
+                    Fc = load(fk_img)
+                elif kind == 'pair':
+                    Fk = load(fk_img)
+                    outs = run_oom_safe(lambda s: make_inference(model, Fc, Fk, multi - 1, s, ver))
                     mids = [img_from(o) for o in outs]
-                state_img = img_from(D)
-                Fc = D
-                if idx < M - 1:
-                    pending = nxt_img
-            else:  # laststatic
-                D = run_oom_safe(lambda s: infer_mid(model, Fc, Fc, s, ver), sc)
-                outs = run_oom_safe(lambda s: make_inference(model, Fc, D, multi - 1, s, ver), sc)
-                mids = [img_from(o) for o in outs]
-                state_img = img_from(D)
-                Fc = D
+                    state_img = fk_img
+                    Fc = Fk
+                elif kind == 'static':
+                    nxt = next_crop()
+                    Fnx = load(nxt)
+                    D = run_oom_safe(lambda s: infer_mid(model, Fc, Fnx, s, ver))
+                    if gpu_ssim(Fc, D) < 0.2:
+                        mids = [left_img]
+                    else:
+                        outs = run_oom_safe(lambda s: make_inference(model, Fc, D, multi - 1, s, ver))
+                        mids = [img_from(o) for o in outs]
+                    state_img = img_from(D)
+                    Fc = D
+                    if i < M - 1:
+                        pending = nxt
+                else:  # laststatic
+                    D = run_oom_safe(lambda s: infer_mid(model, Fc, Fc, s, ver))
+                    outs = run_oom_safe(lambda s: make_inference(model, Fc, D, multi - 1, s, ver))
+                    mids = [img_from(o) for o in outs]
+                    state_img = img_from(D)
+                    Fc = D
 
-            for m in mids:
-                outq.put(np.concatenate((state_img, m), 1) if cfg['montage'] else m)
-            msg_q.put(('prog', 1))
+                for m in mids:
+                    outq.put(np.concatenate((left_img, m), 1) if montage else m)
+                msg_q.put(('prog', 1))
+                i += 1
 
-        if is_last:
-            outq.put(np.concatenate((state_img, state_img), 1) if cfg['montage'] else state_img)
-            msg_q.put(('prog', 1))
-        outq.put(None)
-        wt.join(timeout=300)
-        msg_q.put(('done',))
+            if ch['is_last']:
+                outq.put(np.concatenate((state_img, state_img), 1) if montage else state_img)
+                msg_q.put(('prog', 1))
+            outq.put(None)
+            wt.join(timeout=300)
+            reader.close()
+            msg_q.put(('segdone', ch['cid']))
+            print(tag, 'chunk %d done in %.1fs' % (ch['cid'], time.time() - t0))
     except Exception:
         traceback.print_exc()
         msg_q.put(('error', 'gpu%d worker crashed' % gid))
 
+
+# ---------------- プランナ(親・32x32プロキシのみ) ----------------
 
 def read_proxy32(path):
     proc = subprocess.Popen(
@@ -336,22 +497,26 @@ def build_ops(frames32, multi):
     return ops[1:]
 
 
-def split_chunks(ops, nchunk, multi):
+def split_chunks(ops, nsplit):
+    """stateが実フレームで確定するペア/dup直後のみ切断可(static直後は派生フレーム状態のため不可)"""
     M = len(ops)
-    if nchunk <= 1 or M == 0:
+    if nsplit <= 1 or M == 0:
         return [(1, ops)]
-    wmap = {'pair': float(max(1, multi - 1)), 'dup': 0.05, 'static': float(multi), 'laststatic': float(multi)}
-    target = max(sum(wmap[o] for o in ops), 1e-9) / nchunk
-    chunks, start, acc, nxt_target = [], 0, 0.0, target
+    wmap = {'pair': 1.0, 'dup': 0.05, 'static': 2.0, 'laststatic': 2.0}
+    target = max(sum(wmap[o] for o in ops), 1e-9) / nsplit
+    cuts, acc, nxt_t = [], 0.0, target
     for i in range(M - 1):
         acc += wmap[ops[i]]
-        remain = nchunk - len(chunks)
-        if ops[i] not in ('static', 'laststatic') and acc >= nxt_target and (M - (i + 1)) >= (remain - 1):
-            chunks.append((start + 1, ops[start:i + 1]))
-            start = i + 1
-            nxt_target += target
-    chunks.append((start + 1, ops[start:]))
-    return chunks
+        remain = nsplit - len(cuts)
+        if ops[i] in ('pair', 'dup') and acc >= nxt_t and (M - (i + 1)) >= (remain - 1):
+            cuts.append(i + 1)
+            nxt_t += target
+    bounds = [0] + cuts + [M]
+    out = []
+    for c in range(len(bounds) - 1):
+        if bounds[c] < bounds[c + 1]:
+            out.append((bounds[c] + 1, ops[bounds[c]:bounds[c + 1]]))
+    return out
 
 
 def parse_args():
@@ -374,6 +539,8 @@ def parse_args():
     parser.add_argument('--ngpu', dest='ngpu', type=int, default=0, help='0=自動(最大2)')
     parser.add_argument('--crf', dest='crf', type=int, default=18)
     parser.add_argument('--preset', dest='preset', type=str, default='veryfast')
+    parser.add_argument('--batch', dest='batch', type=int, default=1, help='連続pairの一括バッチ数(2〜4)')
+    parser.add_argument('--split', dest='split', type=int, default=8, help='チャンク分割数(動的割当)')
     return parser.parse_args()
 
 
@@ -388,17 +555,15 @@ def main():
     if args.img is not None:
         args.png = True
 
-    have_ffmpeg = shutil.which('ffmpeg') is not None
     assert torch.cuda.is_available(), 'GPU required'
     ngpu = args.ngpu if args.ngpu > 0 else min(2, torch.cuda.device_count())
     ngpu = max(1, min(ngpu, torch.cuda.device_count()))
-    if args.video is not None:
-        assert have_ffmpeg, 'ffmpeg が必要です'
 
     files = None
     fpsNotAssigned = False
     video_path_wo_ext = None
     if args.video is not None:
+        assert shutil.which('ffmpeg'), 'ffmpeg が必要です'
         w_full, h, fps, audio = ffprobe_meta(args.video)
         ofps = fps * args.multi
         if args.fps is None:
@@ -418,11 +583,15 @@ def main():
         f0 = cv2.imread(os.path.join(args.img, files[0]), cv2.IMREAD_COLOR)
         assert f0 is not None
         h, w_full = f0.shape[:2]
-        fps = None
         frames32 = [cv2.resize(cv2.imread(os.path.join(args.img, f), cv2.IMREAD_COLOR), (32, 32),
                                interpolation=cv2.INTER_AREA) for f in files]
         N = len(frames32)
+        ofps, audio = None, False
         print('image sequence: {} frames'.format(N))
+
+    nvenc = (not args.png) and probe_nvenc()
+    nvdec = (args.video is not None) and probe_nvdec()
+    print('hardware: nvenc={} nvdec={}'.format(nvenc, nvdec))
 
     left = (w_full // 4) if args.montage else 0
     w = (w_full // 2) if args.montage else w_full
@@ -435,48 +604,57 @@ def main():
 
     ops = build_ops(frames32, args.multi)
     M = len(ops)
-    nchunk = max(1, min(ngpu, max(1, M)))
-    chunks = split_chunks(ops, nchunk, args.multi)
-    for i, (fi, c) in enumerate(chunks):
-        print('  gpu%d: iterations %d..%d (%d ops)' % (i, fi, fi + len(c) - 1, len(c)))
+    nsplit = max(1, min(args.split, M))
+    parts = split_chunks(ops, nsplit)
+    chunks = []
+    for cid, (fi, cop) in enumerate(parts):
+        chunks.append(dict(cid=cid, first_iter=fi, ops=cop, is_last=(cid == len(parts) - 1),
+                           seg=os.path.abspath('./rife_seg_%d_%d.%s' % (os.getpid(), cid, args.ext)),
+                           png_start=(fi - 1) * args.multi))
+    for c in chunks:
+        print('  chunk %d: iterations %d..%d (%d ops)' % (c['cid'], c['first_iter'],
+                                                          c['first_iter'] + len(c['ops']) - 1, len(c['ops'])))
 
     ctx = mp.get_context('spawn')
     msg_q = ctx.Queue()
+    chunk_q = ctx.Queue()
     base_cfg = dict(mode='video' if args.video is not None else 'img',
-                    video_path=args.video, img_dir=args.img, files=files,
-                    fps_frac=(fps.numerator, fps.denominator) if fps else (1, 1),
-                    ofps_frac=(ofps.numerator, ofps.denominator), ofps_auto=fpsNotAssigned,
+                    video_path=args.video,
+                    img_paths=[os.path.join(args.img, f) for f in files] if files else None,
+                    ofps_frac=(ofps.numerator, ofps.denominator) if ofps else (1, 1),
                     h=h, w=w, w_full=w_full, left=left, ow=ow, montage=args.montage,
                     multi=args.multi, fp32=args.fp32, model_dir=args.modelDir,
                     padding=padding, png=args.png, scale=args.scale,
-                    crf=args.crf, preset=args.preset)
+                    crf=args.crf, preset=args.preset, batch=args.batch,
+                    nvenc=nvenc, nvdec=nvdec)
 
-    procs, segs = [], []
-    for i, (fi, cop) in enumerate(chunks):
-        cfg = dict(base_cfg)
-        cfg['seg_path'] = os.path.abspath('./rife_seg_%d_%d.%s' % (os.getpid(), i, args.ext))
-        cfg['png_start'] = (fi - 1) * args.multi
-        segs.append(cfg['seg_path'])
-        p = ctx.Process(target=gpu_worker, daemon=True,
-                        args=(i, cfg, cop, fi, i == len(chunks) - 1, msg_q))
+    procs = []
+    for g in range(ngpu):
+        p = ctx.Process(target=gpu_worker, daemon=True, args=(g, base_cfg, chunk_q, msg_q))
         p.start()
         procs.append(p)
+    for c in chunks:
+        chunk_q.put(c)
+    for _ in procs:
+        chunk_q.put(None)
 
     pbar = tqdm(total=max(1, N))
-    done, err, t0 = 0, None, time.time()
-    while done < len(chunks):
+    done_workers, err, t0 = 0, None, time.time()
+    while done_workers < len(procs):
         try:
-            m = msg_q.get(timeout=2)
+            m = msg_q.get(timeout=3)
         except Empty:
-            if not any(p.is_alive() for p in procs):
+            if all(not p.is_alive() for p in procs):
                 err = 'a gpu worker died unexpectedly'
                 break
             continue
         k = m[0]
         if k == 'prog':
             pbar.update(m[1])
+        elif k == 'segdone':
+            pass
         elif k == 'done':
-            done += 1
+            done_workers += 1
         elif k == 'error':
             err = m[1]
             break
@@ -495,30 +673,32 @@ def main():
         print('done: vid_out/*.png')
         return
 
-    for s in segs:
-        assert os.path.exists(s) and os.path.getsize(s) > 0, 'segment missing: ' + s
+    for c in chunks:
+        assert os.path.exists(c['seg']) and os.path.getsize(c['seg']) > 0, 'segment missing: ' + c['seg']
 
     vid_out_name = args.output if args.output is not None else \
         '{}_{}X_{}fps.{}'.format(video_path_wo_ext, args.multi, int(np.round(float(ofps))), args.ext)
     listf = './rife_concat_%d.txt' % os.getpid()
     with open(listf, 'w') as f:
-        for s in segs:
-            f.write("file '%s'\n" % os.path.abspath(s))
+        for c in chunks:
+            f.write("file '%s'\n" % c['seg'])
 
     ok = False
     if args.video is not None and fpsNotAssigned and audio:
         try:
             r = subprocess.run(['ffmpeg', '-v', 'error', '-y', '-nostdin', '-f', 'concat', '-safe', '0',
                                 '-i', listf, '-i', args.video, '-map', '0:v:0', '-map', '1:a:0',
-                                '-c', 'copy', vid_out_name], stderr=subprocess.DEVNULL)
+                                '-c', 'copy', '-movflags', '+faststart', vid_out_name],
+                               stderr=subprocess.DEVNULL)
             ok = r.returncode == 0 and os.path.getsize(vid_out_name) > 0
         except Exception:
             ok = False
-        if not ok:
+        if not ok:  # mkv音声(vorbis等)はmp4に入らない → AACへトランスコード
             try:
                 r = subprocess.run(['ffmpeg', '-v', 'error', '-y', '-nostdin', '-f', 'concat', '-safe', '0',
                                     '-i', listf, '-i', args.video, '-map', '0:v:0', '-map', '1:a:0',
-                                    '-c:v', 'copy', '-c:a', 'aac', '-b:a', '160k', vid_out_name],
+                                    '-c:v', 'copy', '-c:a', 'aac', '-b:a', '160k',
+                                    '-movflags', '+faststart', vid_out_name],
                                    stderr=subprocess.DEVNULL)
                 ok = r.returncode == 0 and os.path.getsize(vid_out_name) > 0
                 if ok:
@@ -527,13 +707,14 @@ def main():
                 ok = False
     if not ok:
         r = subprocess.run(['ffmpeg', '-v', 'error', '-y', '-nostdin', '-f', 'concat', '-safe', '0',
-                            '-i', listf, '-c', 'copy', vid_out_name], stderr=subprocess.DEVNULL)
+                            '-i', listf, '-c', 'copy', '-movflags', '+faststart', vid_out_name],
+                           stderr=subprocess.DEVNULL)
         if not (r.returncode == 0 and os.path.getsize(vid_out_name) > 0) and fpsNotAssigned and args.video is not None:
             print('Audio transfer failed. Interpolated video will have no audio')
     os.remove(listf)
-    for s in segs:
+    for c in chunks:
         try:
-            os.remove(s)
+            os.remove(c['seg'])
         except OSError:
             pass
     print('done:', vid_out_name)
