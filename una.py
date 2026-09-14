@@ -292,27 +292,9 @@ def gpu_worker(gid, base_cfg, chunk_q, msg_q):
 
         # ---- AMPセルフチェック: 実コンテンツ2フレームで判定 ----
         amp_mode = base_cfg['amp_mode']
-        amp_ok = (amp_mode != 'off')
-        if amp_ok and amp_mode == 'auto':
-            try:
-                a8, b8 = _probe_pair(base_cfg)
-                A, B = load(a8), load(b8)
-                with torch.autocast('cuda', enabled=False):
-                    r1 = infer_mid(model, A, B, sc, ver)
-                with torch.autocast('cuda', dtype=torch.float16):
-                    r2 = infer_mid(model, A, B, sc, ver)
-                d = (r1.double() - r2.double()).abs().max().item()
-                if (not np.isfinite(d)) or d > 0.02:
-                    amp_ok = False
-                    print(tag, 'AMP check FAILED on real frames (maxdiff=%.4f) -> fp32' % d)
-                else:
-                    print(tag, 'AMP check ok (maxdiff=%.5f) -> fp16 autocast' % d)
-                del A, B, r1, r2
-            except Exception as e:
-                amp_ok = False
-                print(tag, 'AMP check error -> fp32 :', repr(e))
-        elif amp_ok:
-            print(tag, 'AMP forced ON (--fp16)')
+        amp_ok = (amp_mode == 'on')
+        if amp_ok:
+            print(tag, 'AMP fp16 ON (--fp16): 高モーションでノイズが出たら外してください')
 
         def ac():
             return torch.autocast('cuda', dtype=torch.float16, enabled=amp_ok)
@@ -451,7 +433,7 @@ def gpu_worker(gid, base_cfg, chunk_q, msg_q):
                     raise RuntimeError('unknown op: ' + kind)
 
                 for m in mids:
-                    outq.put(np.concatenate((state_img, m), 1) if montage else m)
+                    outq.put(np.concatenate((li, m), 1) if montage else m)  # 更新前stateを使う(元コード準拠)
                 msg_q.put(('prog', 1))
                 i += 1
 
@@ -555,6 +537,7 @@ def parse_args():
     parser.add_argument('--preset', dest='preset', type=str, default='veryfast')
     parser.add_argument('--batch', dest='batch', type=int, default=1, help='multi==2時のpair連続バッチ(2〜4)')
     parser.add_argument('--split', dest='split', type=int, default=16, help='チャンク分割数')
+    parser.add_argument('--no-nvenc', dest='no_nvenc', action='store_true', help='HWｴﾝｺｰﾄﾞ無効化')
     return parser.parse_args()
 
 
@@ -568,7 +551,7 @@ def main():
     assert args.scale in [0.25, 0.5, 1.0, 2.0, 4.0]
     if args.img is not None:
         args.png = True
-    amp_mode = 'off' if args.fp32 else ('on' if args.fp16 else 'auto')
+    amp_mode = 'on' if args.fp16 else 'off'   # fp16は高モーションで破綻するため明示ONのみ
 
     assert torch.cuda.is_available(), 'GPU required'
     ngpu = args.ngpu if args.ngpu > 0 else min(2, torch.cuda.device_count())
@@ -602,8 +585,8 @@ def main():
         ofps, audio = None, False
         print('image sequence: {} frames'.format(N))
 
-    nvenc = (not args.png) and probe_nvenc()
-    nvdec = (args.video is not None) and probe_nvdec()
+    nvenc = (not args.png) and (not args.no_nvenc) and probe_nvenc()
+    nvdec = (args.video is not None) and (not args.no_nvdec) and probe_nvdec()
     print('hardware: nvenc={} nvdec={}'.format(nvenc, nvdec))
 
     left = (w_full // 4) if args.montage else 0
