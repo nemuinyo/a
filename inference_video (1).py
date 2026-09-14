@@ -2,10 +2,10 @@ import os
 import cv2
 import torch
 import argparse
+# 原版ファイル先頭(またはラッパー)にはこの2行のみ:
 import numpy as np
 np.float = float
 np.int = int
-np.bool = bool
 from tqdm import tqdm
 from torch.nn import functional as F
 import warnings
