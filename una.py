@@ -1,4 +1,7 @@
 import os
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+import sys
 import json
 import shutil
 import argparse
@@ -6,17 +9,20 @@ import warnings
 import traceback
 import subprocess
 import threading
-from queue import Queue
+import multiprocessing as mp
 from concurrent.futures import ThreadPoolExecutor
+from queue import Empty
 
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
 from tqdm import tqdm
-from torch.nn import functional as F
 
 warnings.filterwarnings("ignore")
 from model.pytorch_msssim import ssim_matlab
+
+cv2.setNumThreads(2)
 
 
 def transferAudio(sourceVideo, targetVideo):
@@ -50,7 +56,7 @@ def parse_args():
     parser.add_argument('--img', dest='img', type=str, default=None)
     parser.add_argument('--montage', dest='montage', action='store_true')
     parser.add_argument('--model', dest='modelDir', type=str, default='train_log')
-    parser.add_argument('--fp16', dest='fp16', action='store_true', help='(AMPはデフォルトON。互換用フラグ)')
+    parser.add_argument('--fp16', dest='fp16', action='store_true', help='(AMPはデフォルトON。互換用)')
     parser.add_argument('--fp32', dest='fp32', action='store_true', help='AMP(fp16)を無効化')
     parser.add_argument('--UHD', dest='UHD', action='store_true')
     parser.add_argument('--scale', dest='scale', type=float, default=1.0)
@@ -67,7 +73,7 @@ def parse_args():
     return parser.parse_args()
 
 
-# ---------------- ffmpeg I/O (CPU処理をサブプロセスへオフロード) ----------------
+# ---------------- ffmpeg / cv2 I/O ----------------
 
 def ffprobe_meta(path):
     cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
@@ -87,7 +93,6 @@ def ffprobe_meta(path):
 
 
 class FFmpegReader:
-    """rawvideoをpipeで受ける。BGRのまま流すのでチャンネル反転コストなし"""
     def __init__(self, path, h, w_full, left, w_out):
         self.h, self.w_full, self.left, self.w_out = h, w_full, left, w_out
         self.frame_bytes = h * w_full * 3
@@ -107,7 +112,7 @@ class FFmpegReader:
                 return None
             got += r
         frame = np.frombuffer(buf, dtype=np.uint8).reshape(self.h, self.w_full, 3)
-        if self.w_out != self.w_full:  # montage用クロップ
+        if self.w_out != self.w_full:
             frame = frame[:, self.left:self.left + self.w_out]
         return frame
 
@@ -118,6 +123,23 @@ class FFmpegReader:
             self.proc.wait()
         except Exception:
             pass
+
+
+class CVReader:
+    def __init__(self, path, left, w_out):
+        self.cap = cv2.VideoCapture(path)
+        self.left, self.w_out = left, w_out
+
+    def read(self):
+        ok, f = self.cap.read()
+        if not ok:
+            return None
+        if self.w_out != f.shape[1]:
+            f = f[:, self.left:self.left + self.w_out]
+        return f
+
+    def close(self):
+        self.cap.release()
 
 
 class ImageReader:
@@ -147,7 +169,7 @@ class FFmpegWriter:
                '-framerate', str(fps), '-i', '-',
                '-vf', 'pad=ceil(iw/2)*2:ceil(ih/2)*2',
                '-c:v', 'libx264', '-preset', preset, '-crf', str(crf),
-               '-pix_fmt', 'yuv420p', '-r', str(fps), path]
+               '-pix_fmt', 'yuv420p', '-threads', '2', '-r', str(fps), path]
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
     def write(self, img):
@@ -174,68 +196,18 @@ class CVWriter:
         self.vw.release()
 
 
-# ---------------- GPU前処理 ----------------
+# ---------------- ユーティリティ ----------------
 
-class FrameLoader:
-    """uint8 HWC のままpinned ring bufferで非同期H2Dし、permute/float/padは全てGPU上で実行"""
-    def __init__(self, dev, h, w, padding, depth=3):
-        self.dev, self.padding, self.i = dev, padding, 0
-        self.pin = [torch.empty((h, w, 3), dtype=torch.uint8, pin_memory=True) for _ in range(depth)]
-        self.evt = [torch.cuda.Event() for _ in range(depth)]
-
-    def load(self, frame_np):
-        i = self.i
-        self.i = (i + 1) % len(self.pin)
-        self.evt[i].synchronize()
-        self.pin[i].copy_(torch.from_numpy(frame_np))
-        gpu = self.pin[i].to(self.dev, non_blocking=True)
-        self.evt[i].record()
-        x = gpu.permute(2, 0, 1).unsqueeze(0).float().div_(255.)
-        return F.pad(x, self.padding)
-
-
-def compute_ssim(I0, I1):
-    s0 = F.interpolate(I0.float(), (32, 32), mode='bilinear', align_corners=False)
-    s1 = F.interpolate(I1.float(), (32, 32), mode='bilinear', align_corners=False)
-    return float(ssim_matlab(s0[:, :3], s1[:, :3]))
-
-
-def tensor_to_img(t, h, w):
-    # 転置/クロップ/スケールをGPU側で実行し、CPUには連続なuint8 HWCのみを落とす
-    x = t[0].permute(1, 2, 0)[:h, :w].float().mul(255.).byte().contiguous()
-    return x.cpu().numpy()
-
-
-_batch_ok = True
-
-def make_inference(model, I0, I1, n, scale):
-    """タイムステップ違いを1つのバッチforwardにまとめる(非対応モデルは自動フォールバック)"""
-    global _batch_ok
-    if n <= 0:
-        return []
-    if getattr(model, 'version', 0) >= 3.9:
-        if n == 1:
-            return [model.inference(I0, I1, 0.5, scale)]
-        if _batch_ok:
-            try:
-                ts = torch.arange(1, n + 1, device=I0.device, dtype=I0.dtype).div_(n + 1).view(-1, 1, 1, 1)
-                m = model.inference(I0.repeat(n, 1, 1, 1), I1.repeat(n, 1, 1, 1), ts, scale)
-                return [m[i:i + 1] for i in range(n)]
-            except Exception:
-                _batch_ok = False
-        return [model.inference(I0, I1, (i + 1) * 1. / (n + 1), scale) for i in range(n)]
-    middle = model.inference(I0, I1, scale=scale)
-    if n == 1:
-        return [middle]
-    first = make_inference(model, I0, middle, n // 2, scale)
-    second = make_inference(model, middle, I1, n // 2, scale)
-    if n % 2:
-        return [*first, middle, *second]
-    return [*first, *second]
+def cpu_ssim(a_u8, b_u8):
+    """SSIM判定をCPU完結(32x32なので誤差は実用上無視できる)"""
+    a = cv2.resize(a_u8, (32, 32), interpolation=cv2.INTER_AREA)
+    b = cv2.resize(b_u8, (32, 32), interpolation=cv2.INTER_AREA)
+    ta = torch.from_numpy(a.transpose(2, 0, 1)).unsqueeze(0).float().div_(255.)
+    tb = torch.from_numpy(b.transpose(2, 0, 1)).unsqueeze(0).float().div_(255.)
+    return float(ssim_matlab(ta, tb))
 
 
 class Slots:
-    """バックプレッシャー(メモリ爆発防止)"""
     def __init__(self, n):
         self.n, self.used, self.aborted = n, 0, False
         self.cv = threading.Condition()
@@ -257,49 +229,177 @@ class Slots:
             self.cv.notify_all()
 
 
-# ---------------- パイプライン各スレッド ----------------
+def is_oom(e):
+    return isinstance(e, torch.cuda.OutOfMemoryError) or 'out of memory' in str(e).lower()
 
-def worker(gid, dev, model, args, h, w, task_q, result_q):
-    amp = torch.autocast('cuda', dtype=torch.float16, enabled=not args.fp32)
+
+def lower_scale(scale_val, s):
+    with scale_val.get_lock():
+        if s < scale_val.value:
+            scale_val.value = s
+
+
+def qget(q, procs, timeout=30):
     while True:
-        t = task_q.get()
-        if t is None:
-            return
-        _, seq, I0, I1, base, lf = t
         try:
-            I0 = I0.to(dev)
-            I1 = I1.to(dev)
-            with amp:
-                outs = make_inference(model, I0, I1, args.multi - 1, args.scale)
-            mids = []
-            for o in outs:
-                img = tensor_to_img(o, h, w)
-                mids.append(np.concatenate((base, img), 1) if args.montage else img)
-            result_q.put(('r', seq, lf, mids))
-        except Exception:
-            traceback.print_exc()
-            result_q.put(('abort', f'worker {gid} error'))
-            return
+            return q.get(timeout=timeout)
+        except Empty:
+            if not any(p.is_alive() for p in procs):
+                return ('abort', 'gpu worker died')
 
 
-def sequencer(args, reader, model, dev, loader, task_q, result_q, slots, h, w, workers, lastframe_np):
-    """フレーム読み込み・SSIM判定・スタティック処理(元コードの逐次ロジックを正確に再現)"""
-    I1 = loader.load(lastframe_np)
-    temp = None
-    seq = 0
-    err = False
+# ---------------- 推論(ワーカープロセス内) ----------------
+
+def make_inference(model, I0, I1, n, scale, ver):
+    if n <= 0:
+        return []
+    if ver >= 3.9:
+        if n == 1:
+            return [model.inference(I0, I1, 0.5, scale)]
+        outs = []
+        CH = 4  # バッチタイムステップ(メモリ爆発防止のため4区切り)
+        for s0 in range(0, n, CH):
+            m = min(CH, n - s0)
+            if m == 1:
+                outs.append(model.inference(I0, I1, (s0 + 1) / (n + 1), scale))
+                continue
+            try:
+                ts = (torch.arange(s0 + 1, s0 + m + 1, device=I0.device, dtype=I0.dtype) / (n + 1)).view(-1, 1, 1, 1)
+                mm = model.inference(I0.repeat(m, 1, 1, 1), I1.repeat(m, 1, 1, 1), ts, scale)
+                outs.extend(mm[i:i + 1] for i in range(m))
+            except Exception:
+                outs.extend(model.inference(I0, I1, (i + 1) / (n + 1), scale) for i in range(s0, s0 + m))
+        return outs
+    middle = model.inference(I0, I1, scale)
+    if n == 1:
+        return [middle]
+    first = make_inference(model, I0, middle, n // 2, scale, ver)
+    second = make_inference(model, middle, I1, n // 2, scale, ver)
+    return [*first, middle, *second] if n % 2 else [*first, *second]
+
+
+def infer_mid(model, I0, I1, scale, ver):
+    if ver >= 3.9:
+        return model.inference(I0, I1, 0.5, scale)
+    return model.inference(I0, I1, scale)
+
+
+def gpu_worker(gid, model_dir, n_mid, fp32, h, w, padding, task_q, res_q, static_q, scale_val, probe_evt):
+    tag = f'[gpu{gid}]'
     try:
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(gid)  # 自プロセスは物理GPU gid のみを見る
+        if os.getcwd() not in sys.path:
+            sys.path.insert(0, os.getcwd())
+        dev = torch.device('cuda')
+        torch.set_grad_enabled(False)
+        torch.backends.cudnn.benchmark = True
+        torch.set_num_threads(1)
+
+        from train_log.RIFE_HDv3 import Model
+        model = Model()
+        if not hasattr(model, 'version'):
+            model.version = 0
+        model.load_model(model_dir, -1)
+        print(tag + " Loaded 3.x/4.x HD model.")
+        model.eval()
+        for name in list(vars(model)):
+            o = getattr(model, name)
+            if isinstance(o, torch.nn.Module):
+                o.to(dev)
+        ver = getattr(model, 'version', 0)
+
+        pin = torch.empty((h, w, 3), dtype=torch.uint8, pin_memory=True)
+
+        def to_gpu(u8):
+            np.copyto(pin.numpy(), u8)
+            x = pin.to(dev, non_blocking=True)
+            x = x.permute(2, 0, 1).unsqueeze(0).float().div_(255.)
+            return F.pad(x, padding)
+
+        def img_from(t):
+            x = t[0, :, :h, :w].permute(1, 2, 0).mul(255.).clamp_(0, 255).byte().contiguous()
+            return x.cpu().numpy()
+
+        # ---- 起動時メモリプローブ:実解像度でOOMならscaleを自動半減 ----
+        ph, pw = h + padding[3], w + padding[1]
+        a = torch.zeros(1, 3, ph, pw, device=dev)
+        b = torch.zeros_like(a)
+        scale = scale_val.value
         while True:
+            try:
+                with torch.autocast('cuda', dtype=torch.float16, enabled=not fp32):
+                    infer_mid(model, a, b, scale, ver)
+                break
+            except Exception as e:
+                if not is_oom(e) or scale <= 0.2501:
+                    raise
+                scale = max(0.25, scale / 2)
+                lower_scale(scale_val, scale)
+                torch.cuda.empty_cache()
+        del a, b
+        torch.cuda.empty_cache()
+        probe_evt.set()
+        print(tag + f' ready (scale={scale})')
+
+        # ---- タスクループ ----
+        while True:
+            t = task_q.get()
+            if t is None:
+                return
+            kind, s, x0, x1 = t
+            I0 = to_gpu(x0)
+            I1 = to_gpu(x1)
+            sc = scale_val.value
+            while True:
+                try:
+                    with torch.autocast('cuda', dtype=torch.float16, enabled=not fp32):
+                        if kind == 'pair':
+                            outs = make_inference(model, I0, I1, n_mid - 1, sc, ver)
+                        else:
+                            outs = [infer_mid(model, I0, I1, sc, ver)]
+                    break
+                except Exception as e:
+                    if not is_oom(e) or sc <= 0.2501:
+                        raise
+                    sc = max(0.25, sc / 2)
+                    lower_scale(scale_val, sc)
+                    torch.cuda.empty_cache()
+            imgs = [img_from(o) for o in outs]
+            if kind == 'pair':
+                res_q.put(('r', s, imgs))
+            else:
+                static_q.put(('sres', s, imgs[0]))
+    except Exception:
+        traceback.print_exc()
+        try:
+            probe_evt.set()
+            res_q.put(('abort', f'gpu{gid} worker crashed'))
+            static_q.put(('abort', f'gpu{gid} worker crashed'))
+        except Exception:
+            pass
+
+
+# ---------------- 親プロセス側スレッド ----------------
+
+def run_sequencer(args, reader, procs, events, scale_val, task_q, static_q, writer_q, slots, lastframe_np, state, pbar):
+    try:
+        for ev in events:
+            ev.wait(timeout=600)
+        sc = scale_val.value
+        if abs(sc - args.scale) > 1e-6:
+            print(f"VRAM insufficient at scale={args.scale}: auto-lowered to scale={sc}")
+        temp = None
+        seq = 0
+        while not slots.aborted:
             frame = temp if temp is not None else reader.read()
             temp = None
             if frame is None:
                 break
-            I0 = I1
-            I1 = loader.load(frame)
-            ssim = compute_ssim(I0, I1)
+            I0u8 = lastframe_np
+            ssim = cpu_ssim(I0u8, frame)
             break_flag = False
 
-            if ssim > 0.996:  # スタティック判定(元コードと同一)
+            if ssim > 0.996:  # 静的フレーム判定(元コードと同じロジック)
                 nxt = reader.read()
                 if nxt is None:
                     break_flag = True
@@ -307,99 +407,123 @@ def sequencer(args, reader, model, dev, loader, task_q, result_q, slots, h, w, w
                 else:
                     temp = nxt
                     src = nxt
-                I1 = loader.load(src)
-                with torch.autocast('cuda', dtype=torch.float16, enabled=not args.fp32):
-                    I1 = model.inference(I0, I1, scale=args.scale)
-                ssim = compute_ssim(I0, I1)
-                cur_img = tensor_to_img(I1, h, w)
-            else:
-                cur_img = frame
-
-            base = lastframe_np
-            lf = np.concatenate((base, base), 1) if args.montage else base
-
-            if ssim < 0.2:  # シーンカット:GPUを使わず複製だけ(超高速パス)
-                img0 = tensor_to_img(I0, h, w)
-                mid = np.concatenate((base, img0), 1) if args.montage else img0
                 slots.acquire()
-                result_q.put(('r', seq, lf, [mid] * (args.multi - 1)))
+                if slots.aborted:
+                    return
+                task_q.put(('static', seq, I0u8, src))
+                m = qget(static_q, procs)
+                if m[0] == 'abort':
+                    state['error'] = m[1]
+                    slots.abort()
+                    return
+                mid_u8 = m[2]
+                slots.release()
+                ssim = cpu_ssim(I0u8, mid_u8)
+                frame_out = mid_u8
+            else:
+                frame_out = frame
+
+            if ssim < 0.2:  # シーンカット:GPU不要の複製パス
+                writer_q.put(('full', seq, lastframe_np, [I0u8] * (args.multi - 1)))
             else:
                 slots.acquire()
-                task_q.put(('infer', seq, I0, I1, base, lf))
+                if slots.aborted:
+                    return
+                writer_q.put(('half', seq, lastframe_np))
+                task_q.put(('pair', seq, I0u8, frame_out))
+            lastframe_np = frame_out
+            pbar.update(1)
             seq += 1
-            lastframe_np = cur_img
             if break_flag:
                 break
     except Exception:
-        err = True
         traceback.print_exc()
-        result_q.put(('abort', 'sequencer error'))
+        state['error'] = state['error'] or 'sequencer error'
+        slots.abort()
     finally:
-        for _ in workers:
-            task_q.put(None)
-        for t in workers:
-            t.join()
-        if not err:
-            slots.acquire()
-            lf = np.concatenate((lastframe_np, lastframe_np), 1) if args.montage else lastframe_np
-            result_q.put(('final', lf))
+        writer_q.put(('end',))
 
 
-def writer(args, result_q, out, png_pool, pbar, slots, state):
-    nxt, buf, futs, written = 0, {}, [], 0
+def run_writer(args, writer_q, res_q, out, png_pool, pbar, slots, state, procs):
+    nxt = 0
+    pend_lf, resb = {}, {}
+    cnt = 0
+    futs = []
 
-    def write_one(img):
-        nonlocal written, futs
+    def emit(base, img):
+        nonlocal cnt, futs
+        final = np.concatenate((base, img), 1) if args.montage else img
         if args.png:
-            futs.append(png_pool.submit(cv2.imwrite, 'vid_out/{:0>7d}.png'.format(written), img))
+            futs.append(png_pool.submit(cv2.imwrite, 'vid_out/{:0>7d}.png'.format(cnt), final))
             if len(futs) > 64:
                 futs = [f for f in futs if not f.done()]
+            cnt += 1
         elif out is not None:
-            out.write(img)
-        written += 1
+            out.write(final)
 
-    while True:
-        m = result_q.get()
-        if m[0] == 'abort':
-            state['error'] = m[1]
-            slots.abort()
-            return
-        if m[0] == 'final':
-            slots.release()
-            write_one(m[1])
-            while nxt in buf:
-                lf, mids = buf.pop(nxt)
-                write_one(lf)
-                for im in mids:
-                    write_one(im)
-                pbar.update(1)
-                nxt += 1
-            return
-        _, seq, lf, mids = m
-        slots.release()
-        buf[seq] = (lf, mids)
-        while nxt in buf:
-            lf, mids = buf.pop(nxt)
-            write_one(lf)
-            for im in mids:
-                write_one(im)
-            pbar.update(1)
+    def flush():
+        nonlocal nxt
+        while nxt in pend_lf and nxt in resb:
+            lf, outs = pend_lf.pop(nxt), resb.pop(nxt)
+            emit(lf, lf)
+            for im in outs:
+                emit(lf, im)
             nxt += 1
 
+    def recv_res():
+        nonlocal nxt
+        m = res_q.get(timeout=30) if False else None
+        return m
 
-def build_model(model_dir, dev):
-    from train_log.RIFE_HDv3 import Model
-    m = Model()
-    if not hasattr(m, 'version'):
-        m.version = 0
-    m.load_model(model_dir, -1)
-    print("Loaded 3.x/4.x HD model.")
-    m.eval()
-    for name in list(vars(m)):  # 全サブネットを指定GPUへ(Model側の実装差異に対応)
-        o = getattr(m, name)
-        if isinstance(o, torch.nn.Module):
-            o.to(dev)
-    return m
+    while True:
+        try:
+            m = writer_q.get(timeout=30)
+        except Empty:
+            if not any(p.is_alive() for p in procs):
+                state['error'] = state['error'] or 'gpu worker died unexpectedly'
+                slots.abort()
+                return
+            continue
+        t = m[0]
+        if t == 'full':
+            _, s, lf, outs = m
+            pend_lf[s] = lf
+            resb[s] = outs
+            flush()
+        elif t == 'half':
+            _, s, lf = m
+            pend_lf[s] = lf
+            flush()
+        elif t == 'r':
+            _, s, outs = m
+            resb[s] = outs
+            slots.release()
+            flush()
+        elif t == 'abort':
+            state['error'] = state['error'] or m[1]
+            slots.abort()
+        elif t == 'end':
+            while pend_lf or resb:  # 残りの結果を排水してから終了
+                try:
+                    m2 = res_q.get(timeout=30)
+                except Empty:
+                    if not any(p.is_alive() for p in procs):
+                        state['error'] = state['error'] or 'workers died before finishing'
+                        break
+                    continue
+                if m2[0] == 'r':
+                    resb[m2[1]] = m2[2]
+                    slots.release()
+                    flush()
+                elif m2[0] == 'abort':
+                    state['error'] = state['error'] or m2[1]
+                    break
+            flush()
+            return
+
+
+def build_main():
+    pass
 
 
 def main():
@@ -415,52 +539,43 @@ def main():
     if not args.img is None:
         args.png = True
 
-    assert torch.cuda.is_available(), "GPUが必要です"
-    torch.set_grad_enabled(False)
-    torch.backends.cudnn.enabled = True
-    torch.backends.cudnn.benchmark = True
+    assert torch.cuda.is_available(), "GPU required"
     ngpu = args.ngpu if args.ngpu > 0 else min(2, torch.cuda.device_count())
-    dev0 = torch.device('cuda:0')
+    ngpu = max(1, min(ngpu, torch.cuda.device_count()))
+    have_ffmpeg = shutil.which('ffmpeg') is not None
 
-    models = [build_model(args.modelDir, dev0)]
-    for g in range(1, ngpu):
-        models.append(build_model(args.modelDir, torch.device(f'cuda:{g}')))
-
+    fpsNotAssigned = False
+    video_path_wo_ext = None
     if args.video is not None:
-        w_full, h, fps, tot_frame = ffprobe_meta(args.video)
+        w_full, h_probe, fps, tot_frame = ffprobe_meta(args.video)
         if args.fps is None:
             fpsNotAssigned = True
             args.fps = fps * args.multi
-        else:
-            fpsNotAssigned = False
         video_path_wo_ext, ext = os.path.splitext(args.video)
-        print('{}.{}, {} frames in total, {}FPS to {}FPS'.format(
-            video_path_wo_ext, args.ext, tot_frame, fps, args.fps))
+        print('{}.{}, {} frames in total, {}FPS to {}FPS'.format(video_path_wo_ext, args.ext, tot_frame, fps, args.fps))
         if args.png == False and fpsNotAssigned == True:
             print("The audio will be merged after interpolation process")
         else:
             print("Will not merge audio because using png or fps flag!")
-        left = 0
-        if args.montage:
-            left = w_full // 4
-        w = w_full // 2 if args.montage else w_full
-        reader = FFmpegReader(args.video, h, w_full, left, w)
+        left = w_full // 4 if args.montage else 0
+        w_init = w_full // 2 if args.montage else w_full
+        reader = FFmpegReader(args.video, h_probe, w_full, left, w_init) if have_ffmpeg \
+            else CVReader(args.video, left, w_init)
     else:
         files = [f for f in os.listdir(args.img) if 'png' in f]
         files.sort(key=lambda x: int(x[:-4]))
+        tot_frame = len(files)
         f0 = cv2.imread(os.path.join(args.img, files[0]))
         assert f0 is not None
-        tot_frame = len(files)
-        fpsNotAssigned = False
-        left = 0
-        if args.montage:
-            left = f0.shape[1] // 4
-        w = f0.shape[1] // 2 if args.montage else f0.shape[1]
-        h = f0.shape[0]
-        reader = ImageReader(args.img, files, left, w)
-        print('image sequence: {} frames, {}x{}'.format(tot_frame, w, h))
+        left = f0.shape[1] // 4 if args.montage else 0
+        w_init = f0.shape[1] // 2 if args.montage else f0.shape[1]
+        reader = ImageReader(args.img, files, left, w_init)
+        print('image sequence: {} frames'.format(tot_frame))
 
-    lastframe_np = reader.read()
+    lastframe = reader.read()
+    assert lastframe is not None, "cannot read the first frame"
+    h, w = lastframe.shape[:2]
+
     tmp = max(128, int(128 / args.scale))
     ph = ((h - 1) // tmp + 1) * tmp
     pw = ((w - 1) // tmp + 1) * tmp
@@ -468,48 +583,60 @@ def main():
 
     vid_out_name = None
     out = None
+    out_w = w * 2 if args.montage else w  # 元コードのmontage時の出力サイズ不具合も修正
     if args.png:
         os.makedirs('vid_out', exist_ok=True)
     else:
         vid_out_name = args.output if args.output is not None else \
             '{}_{}X_{}fps.{}'.format(video_path_wo_ext, args.multi, int(np.round(args.fps)), args.ext)
-        if args.cv_writer or shutil.which('ffmpeg') is None:
-            out = CVWriter(vid_out_name, args.fps, w, h)
+        if args.cv_writer or not have_ffmpeg:
+            out = CVWriter(vid_out_name, args.fps, out_w, h)
         else:
-            out = FFmpegWriter(vid_out_name, args.fps, w, h, args.crf, args.preset)
+            out = FFmpegWriter(vid_out_name, args.fps, out_w, h, args.crf, args.preset)
 
-    pbar = tqdm(total=max(1, tot_frame))
-    task_q = Queue(maxsize=8)
-    result_q = Queue()
+    ctx = mp.get_context('spawn')
+    scale_val = ctx.Value('d', float(args.scale))
+    events = [ctx.Event() for _ in range(ngpu)]
+    task_q = ctx.Queue(maxsize=8)
+    res_q = ctx.Queue()
+    static_q = ctx.Queue()
+    writer_q = ctx.Queue()
     slots = Slots(2 * ngpu + 4)
-    state = {'error': None}
-    png_pool = ThreadPoolExecutor(max_workers=4) if args.png else None
 
-    workers = []
+    procs = []
     for g in range(ngpu):
-        t = threading.Thread(target=worker, args=(g, torch.device(f'cuda:{g}'),
-                                                  models[g], args, h, w, task_q, result_q), daemon=True)
-        t.start()
-        workers.append(t)
+        p = ctx.Process(target=gpu_worker, daemon=True,
+                        args=(g, args.modelDir, args.multi, args.fp32, h, w, padding,
+                              task_q, res_q, static_q, scale_val, events[g]))
+        p.start()
+        procs.append(p)
 
-    seq_thread = threading.Thread(
-        target=sequencer,
-        args=(args, reader, models[0], dev0, FrameLoader(dev0, h, w, padding),
-              task_q, result_q, slots, h, w, workers, lastframe_np), daemon=True)
-    seq_thread.start()
-    wt = threading.Thread(target=writer, args=(args, result_q, out, png_pool, pbar, slots, state), daemon=True)
+    state = {'error': None}
+    pbar = tqdm(total=max(1, tot_frame))
+    png_pool = ThreadPoolExecutor(max_workers=4) if args.png else None
+    wt = threading.Thread(target=run_writer, daemon=True,
+                          args=(args, writer_q, res_q, out, png_pool, pbar, slots, state, procs))
     wt.start()
 
-    seq_thread.join()
-    wt.join()
-    if state['error']:
-        raise RuntimeError(state['error'])
+    run_sequencer(args, reader, procs, events, scale_val, task_q, static_q, writer_q, slots, lastframe, state, pbar)
+
+    for _ in procs:
+        try:
+            task_q.put_nowait(None)
+        except Exception:
+            pass
+    for p in procs:
+        p.join(timeout=60)
+    wt.join(timeout=600)
     if png_pool:
         png_pool.shutdown(wait=True)
     if out is not None:
         out.close()
     reader.close()
     pbar.close()
+
+    if state['error']:
+        raise RuntimeError(state['error'])
 
     if args.png == False and fpsNotAssigned == True and args.video is not None:
         try:
