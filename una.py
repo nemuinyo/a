@@ -125,23 +125,6 @@ class FFmpegReader:
             pass
 
 
-class CVReader:
-    def __init__(self, path, left, w_out):
-        self.cap = cv2.VideoCapture(path)
-        self.left, self.w_out = left, w_out
-
-    def read(self):
-        ok, f = self.cap.read()
-        if not ok:
-            return None
-        if self.w_out != f.shape[1]:
-            f = f[:, self.left:self.left + self.w_out]
-        return f
-
-    def close(self):
-        self.cap.release()
-
-
 class ImageReader:
     def __init__(self, folder, files, left, w_out):
         self.paths = [os.path.join(folder, f) for f in files]
@@ -185,21 +168,9 @@ class FFmpegWriter:
             pass
 
 
-class CVWriter:
-    def __init__(self, path, fps, w, h):
-        self.vw = cv2.VideoWriter(path, cv2.VideoWriter_fourcc('m', 'p', '4', 'v'), float(fps), (w, h))
-
-    def write(self, img):
-        self.vw.write(img)
-
-    def close(self):
-        self.vw.release()
-
-
 # ---------------- ユーティリティ ----------------
 
 def cpu_ssim(a_u8, b_u8):
-    """SSIM判定をCPU完結(32x32なので誤差は実用上無視できる)"""
     a = cv2.resize(a_u8, (32, 32), interpolation=cv2.INTER_AREA)
     b = cv2.resize(b_u8, (32, 32), interpolation=cv2.INTER_AREA)
     ta = torch.from_numpy(a.transpose(2, 0, 1)).unsqueeze(0).float().div_(255.)
@@ -216,11 +187,12 @@ class Slots:
         with self.cv:
             while self.used >= self.n and not self.aborted:
                 self.cv.wait()
-            self.used += 1
+            if not self.aborted:
+                self.used += 1
 
     def release(self):
         with self.cv:
-            self.used -= 1
+            self.used = max(0, self.used - 1)
             self.cv.notify()
 
     def abort(self):
@@ -257,7 +229,7 @@ def make_inference(model, I0, I1, n, scale, ver):
         if n == 1:
             return [model.inference(I0, I1, 0.5, scale)]
         outs = []
-        CH = 4  # バッチタイムステップ(メモリ爆発防止のため4区切り)
+        CH = 4
         for s0 in range(0, n, CH):
             m = min(CH, n - s0)
             if m == 1:
@@ -284,10 +256,10 @@ def infer_mid(model, I0, I1, scale, ver):
     return model.inference(I0, I1, scale)
 
 
-def gpu_worker(gid, model_dir, n_mid, fp32, h, w, padding, task_q, res_q, static_q, scale_val, probe_evt):
+def gpu_worker(gid, model_dir, n_mid, fp32, h, w, padding, task_q, writer_q, static_q, scale_val, probe_evt):
     tag = f'[gpu{gid}]'
     try:
-        os.environ['CUDA_VISIBLE_DEVICES'] = str(gid)  # 自プロセスは物理GPU gid のみを見る
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(gid)
         if os.getcwd() not in sys.path:
             sys.path.insert(0, os.getcwd())
         dev = torch.device('cuda')
@@ -320,7 +292,7 @@ def gpu_worker(gid, model_dir, n_mid, fp32, h, w, padding, task_q, res_q, static
             x = t[0, :, :h, :w].permute(1, 2, 0).mul(255.).clamp_(0, 255).byte().contiguous()
             return x.cpu().numpy()
 
-        # ---- 起動時メモリプローブ:実解像度でOOMならscaleを自動半減 ----
+        # 起動時メモリプローブ
         ph, pw = h + padding[3], w + padding[1]
         a = torch.zeros(1, 3, ph, pw, device=dev)
         b = torch.zeros_like(a)
@@ -341,7 +313,6 @@ def gpu_worker(gid, model_dir, n_mid, fp32, h, w, padding, task_q, res_q, static
         probe_evt.set()
         print(tag + f' ready (scale={scale})')
 
-        # ---- タスクループ ----
         while True:
             t = task_q.get()
             if t is None:
@@ -366,20 +337,20 @@ def gpu_worker(gid, model_dir, n_mid, fp32, h, w, padding, task_q, res_q, static
                     torch.cuda.empty_cache()
             imgs = [img_from(o) for o in outs]
             if kind == 'pair':
-                res_q.put(('r', s, imgs))
+                writer_q.put(('r', s, imgs))   # ★ 結果は writer_q へ(単一キーに統一)
             else:
                 static_q.put(('sres', s, imgs[0]))
     except Exception:
         traceback.print_exc()
         try:
             probe_evt.set()
-            res_q.put(('abort', f'gpu{gid} worker crashed'))
+            writer_q.put(('abort', f'gpu{gid} worker crashed'))
             static_q.put(('abort', f'gpu{gid} worker crashed'))
         except Exception:
             pass
 
 
-# ---------------- 親プロセス側スレッド ----------------
+# ---------------- 親プロセス側 ----------------
 
 def run_sequencer(args, reader, procs, events, scale_val, task_q, static_q, writer_q, slots, lastframe_np, state, pbar):
     try:
@@ -399,7 +370,7 @@ def run_sequencer(args, reader, procs, events, scale_val, task_q, static_q, writ
             ssim = cpu_ssim(I0u8, frame)
             break_flag = False
 
-            if ssim > 0.996:  # 静的フレーム判定(元コードと同じロジック)
+            if ssim > 0.996:
                 nxt = reader.read()
                 if nxt is None:
                     break_flag = True
@@ -423,8 +394,8 @@ def run_sequencer(args, reader, procs, events, scale_val, task_q, static_q, writ
             else:
                 frame_out = frame
 
-            if ssim < 0.2:  # シーンカット:GPU不要の複製パス
-                writer_q.put(('full', seq, lastframe_np, [I0u8] * (args.multi - 1)))
+            if ssim < 0.2:
+                writer_q.put(('full', seq, I0u8, [I0u8] * (args.multi - 1)))
             else:
                 slots.acquire()
                 if slots.aborted:
@@ -441,14 +412,15 @@ def run_sequencer(args, reader, procs, events, scale_val, task_q, static_q, writ
         state['error'] = state['error'] or 'sequencer error'
         slots.abort()
     finally:
-        writer_q.put(('end',))
+        writer_q.put(('end', seq))  # ★ 処理済み入力フレーム総数を渡して終了
 
 
-def run_writer(args, writer_q, res_q, out, png_pool, pbar, slots, state, procs):
+def run_writer(args, writer_q, out, png_pool, pbar, slots, state, procs):
     nxt = 0
     pend_lf, resb = {}, {}
     cnt = 0
     futs = []
+    total_needed = None
 
     def emit(base, img):
         nonlocal cnt, futs
@@ -470,15 +442,12 @@ def run_writer(args, writer_q, res_q, out, png_pool, pbar, slots, state, procs):
                 emit(lf, im)
             nxt += 1
 
-    def recv_res():
-        nonlocal nxt
-        m = res_q.get(timeout=30) if False else None
-        return m
-
     while True:
         try:
             m = writer_q.get(timeout=30)
         except Empty:
+            if state['error'] or slots.aborted:
+                return
             if not any(p.is_alive() for p in procs):
                 state['error'] = state['error'] or 'gpu worker died unexpectedly'
                 slots.abort()
@@ -497,33 +466,16 @@ def run_writer(args, writer_q, res_q, out, png_pool, pbar, slots, state, procs):
         elif t == 'r':
             _, s, outs = m
             resb[s] = outs
-            slots.release()
+            slots.release()  # ★ ここで初めてスロットが解放される
             flush()
         elif t == 'abort':
             state['error'] = state['error'] or m[1]
             slots.abort()
-        elif t == 'end':
-            while pend_lf or resb:  # 残りの結果を排水してから終了
-                try:
-                    m2 = res_q.get(timeout=30)
-                except Empty:
-                    if not any(p.is_alive() for p in procs):
-                        state['error'] = state['error'] or 'workers died before finishing'
-                        break
-                    continue
-                if m2[0] == 'r':
-                    resb[m2[1]] = m2[2]
-                    slots.release()
-                    flush()
-                elif m2[0] == 'abort':
-                    state['error'] = state['error'] or m2[1]
-                    break
-            flush()
             return
-
-
-def build_main():
-    pass
+        elif t == 'end':
+            total_needed = m[1]
+            if nxt >= total_needed:
+                return
 
 
 def main():
@@ -559,8 +511,7 @@ def main():
             print("Will not merge audio because using png or fps flag!")
         left = w_full // 4 if args.montage else 0
         w_init = w_full // 2 if args.montage else w_full
-        reader = FFmpegReader(args.video, h_probe, w_full, left, w_init) if have_ffmpeg \
-            else CVReader(args.video, left, w_init)
+        reader = FFmpegReader(args.video, h_probe, w_full, left, w_init)
     else:
         files = [f for f in os.listdir(args.img) if 'png' in f]
         files.sort(key=lambda x: int(x[:-4]))
@@ -583,14 +534,15 @@ def main():
 
     vid_out_name = None
     out = None
-    out_w = w * 2 if args.montage else w  # 元コードのmontage時の出力サイズ不具合も修正
+    out_w = w * 2 if args.montage else w
     if args.png:
         os.makedirs('vid_out', exist_ok=True)
     else:
         vid_out_name = args.output if args.output is not None else \
             '{}_{}X_{}fps.{}'.format(video_path_wo_ext, args.multi, int(np.round(args.fps)), args.ext)
         if args.cv_writer or not have_ffmpeg:
-            out = CVWriter(vid_out_name, args.fps, out_w, h)
+            fourcc = cv2.VideoWriter_fourcc('m', 'p', '4', 'v')
+            out = cv2.VideoWriter(vid_out_name, fourcc, float(args.fps), (out_w, h))
         else:
             out = FFmpegWriter(vid_out_name, args.fps, out_w, h, args.crf, args.preset)
 
@@ -598,16 +550,15 @@ def main():
     scale_val = ctx.Value('d', float(args.scale))
     events = [ctx.Event() for _ in range(ngpu)]
     task_q = ctx.Queue(maxsize=8)
-    res_q = ctx.Queue()
     static_q = ctx.Queue()
-    writer_q = ctx.Queue()
+    writer_q = ctx.Queue()   # ★ res_q は廃止。writer_q に統一
     slots = Slots(2 * ngpu + 4)
 
     procs = []
     for g in range(ngpu):
         p = ctx.Process(target=gpu_worker, daemon=True,
                         args=(g, args.modelDir, args.multi, args.fp32, h, w, padding,
-                              task_q, res_q, static_q, scale_val, events[g]))
+                              task_q, writer_q, static_q, scale_val, events[g]))
         p.start()
         procs.append(p)
 
@@ -615,7 +566,7 @@ def main():
     pbar = tqdm(total=max(1, tot_frame))
     png_pool = ThreadPoolExecutor(max_workers=4) if args.png else None
     wt = threading.Thread(target=run_writer, daemon=True,
-                          args=(args, writer_q, res_q, out, png_pool, pbar, slots, state, procs))
+                          args=(args, writer_q, out, png_pool, pbar, slots, state, procs))
     wt.start()
 
     run_sequencer(args, reader, procs, events, scale_val, task_q, static_q, writer_q, slots, lastframe, state, pbar)
@@ -631,7 +582,10 @@ def main():
     if png_pool:
         png_pool.shutdown(wait=True)
     if out is not None:
-        out.close()
+        if hasattr(out, 'close'):
+            out.close()
+        else:
+            out.release()
     reader.close()
     pbar.close()
 
