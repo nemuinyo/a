@@ -272,14 +272,14 @@ def gpu_worker(gid, base_cfg, chunk_q, msg_q):
             x = t[0, :, :h, :w].permute(1, 2, 0).float().mul_(255.).clamp_(0, 255).byte().flip(2)  # RGB→BGR
             return x.contiguous().cpu().numpy()
 
-        # ---- 起動時メモリプローブ ----
+        # ---- 起動時メモリプローブ(★修正: fp32で実施=保守判定。旧版の base_cfg['fp32'] 参照残骸がKeyErrorの原因) ----
         ph, pw = h + padding[3], w + padding[1]
         a = torch.zeros(1, 3, ph, pw, device=dev)
         b = torch.zeros_like(a)
         sc = base_cfg['scale']
         while True:
             try:
-                with torch.autocast('cuda', dtype=torch.float16, enabled=not base_cfg['fp32']):
+                with torch.autocast('cuda', enabled=False):
                     infer_mid(model, a, b, sc, ver)
                 break
             except Exception as e:
@@ -290,7 +290,7 @@ def gpu_worker(gid, base_cfg, chunk_q, msg_q):
         del a, b
         torch.cuda.empty_cache()
 
-        # ---- AMPセルフチェック: 実コンテンツ2フレームで判定(乱数は病的すぎるため) ----
+        # ---- AMPセルフチェック: 実コンテンツ2フレームで判定 ----
         amp_mode = base_cfg['amp_mode']
         amp_ok = (amp_mode != 'off')
         if amp_ok and amp_mode == 'auto':
@@ -339,7 +339,7 @@ def gpu_worker(gid, base_cfg, chunk_q, msg_q):
             except Exception as e:
                 print(tag, 'batch unsupported -> batch=1 :', repr(e))
                 batch = 1
-        elif batch > 1 and multi != 2:
+        elif batch > 1:
             batch = 1  # バッチパスはmulti==2専用
 
         print(tag, 'ready (scale=%g, amp=%s, batch=%d)' % (sc, amp_ok, batch))
@@ -362,7 +362,7 @@ def gpu_worker(gid, base_cfg, chunk_q, msg_q):
         while True:
             ch = chunk_q.get()
             if ch is None:
-                msg_q.put(('done', gid))  # ★修正: 正常終了を親に通知(前回の誤検知の原因)
+                msg_q.put(('done', gid))  # 正常終了を親へ通知
                 return
             t0 = time.time()
             segcfg = dict(base_cfg)
@@ -421,7 +421,7 @@ def gpu_worker(gid, base_cfg, chunk_q, msg_q):
                 outq.put(np.concatenate((li, li), 1) if montage else li)
 
                 if kind == 'dup':
-                    mids = [li] * (multi - 1)  # ★修正: multi>2対応
+                    mids = [li] * (multi - 1)
                     state_img = fk_img
                     Fc = load(fk_img)
                 elif kind == 'pair':
@@ -439,7 +439,7 @@ def gpu_worker(gid, base_cfg, chunk_q, msg_q):
                     Fsrc = load(src)
                     D = run_oom_safe(lambda s: infer_mid(model, Fc, Fsrc, s, ver))
                     if gpu_ssim(Fc, D) < 0.2:
-                        mids = [li] * (multi - 1)  # ★修正: multi>2対応
+                        mids = [li] * (multi - 1)
                     else:
                         outs = run_oom_safe(lambda s: make_inference(model, Fc, D, multi - 1, s, ver))
                         mids = [img_from(o) for o in outs]
@@ -512,18 +512,22 @@ def build_ops(frames32, multi):
     return ops[1:]
 
 
-def split_chunks(ops, nsplit):
+def split_chunks(ops, nsplit, min_ops=4):
+    """stateが実フレームで確定するpair/dup直後のみ切断可。★ min_opsで1-opチャンク(起動オーバーヘッド)を回避"""
     M = len(ops)
     if nsplit <= 1 or M == 0:
         return [(1, ops)]
     wmap = {'pair': 1.0, 'dup': 0.05, 'static': 2.0, 'laststatic': 2.0}
     target = max(sum(wmap[o] for o in ops), 1e-9) / nsplit
-    cuts, acc, nxt_t = [], 0.0, target
+    cuts, acc, nxt_t, start = [], 0.0, target, 0
     for i in range(M - 1):
         acc += wmap[ops[i]]
         remain = nsplit - len(cuts)
-        if ops[i] in ('pair', 'dup') and acc >= nxt_t and (M - (i + 1)) >= (remain - 1):
+        if (ops[i] in ('pair', 'dup') and acc >= nxt_t
+                and (M - (i + 1)) >= (remain - 1)
+                and (i + 1 - start) >= min_ops):
             cuts.append(i + 1)
+            start = i + 1
             nxt_t += target
     bounds = [0] + cuts + [M]
     return [(bounds[c] + 1, ops[bounds[c]:bounds[c + 1]]) for c in range(len(bounds) - 1)
