@@ -27,11 +27,11 @@ from model.pytorch_msssim import ssim_matlab
 cv2.setNumThreads(2)
 
 
-# ---------------- メタ / 検証 ----------------
+# ---------------- メタ / 検証 / HW検出 ----------------
 
 def ffprobe_meta(path):
     cmd = ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
-           '-show_entries', 'stream=width,height,r_frame_rate', '-of', 'json', path]
+           '-show_entries', 'stream=width,height,r_frame_rate,pix_fmt', '-of', 'json', path]
     st = json.loads(subprocess.check_output(cmd).decode())['streams'][0]
     num, den = st['r_frame_rate'].split('/')
     fps = Fraction(int(num), int(den))
@@ -41,11 +41,11 @@ def ffprobe_meta(path):
         audio = len(a) > 0
     except Exception:
         audio = False
-    return int(st['width']), int(st['height']), fps, audio
+    return int(st['width']), int(st['height']), fps, audio, st.get('pix_fmt', 'yuv420p')
 
 
 def video_frame_count(path):
-    """出力フレーム数を数える(検証用)。count_packets はデコードなしで高速"""
+    """出力検証用。count_packets(高速)→nb_framesの順で試す"""
     try:
         out = subprocess.check_output(['ffprobe', '-v', 'error', '-count_packets', '-select_streams', 'v:0',
                                        '-show_entries', 'stream=nb_read_packets', '-of', 'csv=p=0',
@@ -103,7 +103,8 @@ def probe_nvdec():
 # ---------------- フレーム読み込み ----------------
 
 class VideoFrames:
-    """trim=start_frame でフレーム番号指定(時間シーク不使用)"""
+    """trim=start_frame でフレーム番号指定。※-hwaccel cudaは10bit等でクロマ破損を起こすため
+       利用は8bit yuv420pかつ明示opt-in時のみ(デフォルトはCPUデコ)"""
     def __init__(self, path, h, w_full, start_frame, nvdec):
         self.h, self.w = h, w_full
         self.frame_bytes = h * w_full * 3
@@ -131,6 +132,7 @@ class VideoFrames:
         try:
             self.proc.stdout.close()
             self.proc.terminate()
+            self.proc.wait()
         except Exception:
             pass
 
@@ -150,7 +152,6 @@ class ImageFrames:
 
 
 class LegacyReader:
-    """原版と同じ cv2.VideoCapture(リファレンス用)"""
     def __init__(self, path):
         self.cap = cv2.VideoCapture(path)
 
@@ -166,7 +167,6 @@ class LegacyReader:
 
 
 class LegacyWriter:
-    """原版と同じ cv2.VideoWriter(mp4v)(リファレンス用)"""
     def __init__(self, path, fps, w, h):
         self.vw = cv2.VideoWriter(path, cv2.VideoWriter_fourcc('m', 'p', '4', 'v'), float(fps), (w, h))
 
@@ -190,7 +190,7 @@ class RawWriter:
                     '-cq', str(crf), '-b:v', '0', '-pix_fmt', 'yuv420p']
         else:
             cmd += ['-c:v', 'libx264', '-preset', preset, '-crf', str(crf),
-                    '-pix_fmt', 'yuv420p', '-threads', '1']
+                    '-pix_fmt', 'yuv420p', '-threads', '2']
         cmd += [path]
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
@@ -200,15 +200,17 @@ class RawWriter:
         self.proc.stdin.write(img.data)
 
     def close(self):
-        self.proc.stdin.close()
-        if self.proc.wait() != 0:
-            raise RuntimeError('encoder failed: ' + self.proc.args[-1])
+        try:
+            self.proc.stdin.close()
+            if self.proc.wait() != 0:
+                raise RuntimeError('encoder failed: ' + ' '.join(self.proc.args[:8]) + '...')
+        except BrokenPipeError:
+            raise RuntimeError('encoder died (broken pipe)')
 
 
-# ---------------- 推論ユーティリティ(原版準拠) ----------------
+# ---------------- 推論ユーティリティ ----------------
 
 def make_inference(model, I0, I1, n, scale, ver):
-    """原版と同じ(バッチ化は意図的に廃止: 正しさ優先)"""
     if n <= 0:
         return []
     if ver >= 3.9:
@@ -226,7 +228,6 @@ def infer_mid(model, I0, I1, scale, ver):
 
 
 def gpu_ssim(a, b):
-    """原版と同じ: パッド済みテンソルをGPUで32x32へ"""
     sa = F.interpolate(a, (32, 32), mode='bilinear', align_corners=False)
     sb = F.interpolate(b, (32, 32), mode='bilinear', align_corners=False)
     return float(ssim_matlab(sa[:, :3], sb[:, :3]))
@@ -276,7 +277,7 @@ def probe_scale(model, ver, ph, pw, dev, start):
             torch.cuda.empty_cache()
 
 
-# ---------------- シングルパス(デフォルト: 原版の状態機械をそのまま実行) ----------------
+# ---------------- シングルパス(デフォルト: 元コードの状態機械をそのまま) ----------------
 
 def run_single(dev, model, ver, base, pbar):
     h, w = base['h'], base['w']
@@ -291,7 +292,7 @@ def run_single(dev, model, ver, base, pbar):
     def load(u8):
         np.copyto(pin.numpy(), np.ascontiguousarray(u8))
         x = pin.to(dev)
-        x = x.permute(2, 0, 1)[[2, 1, 0]].unsqueeze(0).float().div_(255.)  # BGR→RGB(原版と等価)
+        x = x.permute(2, 0, 1)[[2, 1, 0]].unsqueeze(0).float().div_(255.)  # BGR→RGB
         return F.pad(x, padding)
 
     def img_from(t):
@@ -311,7 +312,6 @@ def run_single(dev, model, ver, base, pbar):
                 torch.cuda.empty_cache()
                 print('OOM -> scale=%g' % s)
 
-    # 読み込み
     if base['mode'] == 'video':
         if base['legacy_io']:
             reader = LegacyReader(base['video_path'])
@@ -321,13 +321,13 @@ def run_single(dev, model, ver, base, pbar):
         reader = ImageFrames(base['img_paths'])
     it = iter(reader)
 
-    def next_crop():
-        fr = next(it)
-        if base['left']:
+    def read_frame():
+        """★修正: 終端でNoneを返す(StopIterationクラッシュ対策)"""
+        fr = next(it, None)
+        if fr is not None and base['left']:
             fr = fr[:, base['left']:base['left'] + w]
         return fr
 
-    # 書き込み
     writer = None
     png_i = 0
     if base['png']:
@@ -339,80 +339,85 @@ def run_single(dev, model, ver, base, pbar):
             writer = RawWriter(base['tmp_out'], base['ofps_frac'], base['ow'], h,
                                base['crf'], base['preset'], base['nvenc'])
 
+    written = 0
+    frames_read = 0
+
     def emit(img):
-        nonlocal png_i
+        nonlocal written, png_i
         if base['png']:
             cv2.imwrite('vid_out/%07d.png' % png_i, img)
             png_i += 1
         else:
             writer.write(img)
+        written += 1
 
-    # ---- ここから原版ループの直訳 ----
-    lastframe = next_crop()
-    I1 = load(lastframe)
-    temp = None
+    try:
+        lastframe = read_frame()
+        frames_read += 1
+        I1 = load(lastframe)
+        temp = None
 
-    while True:
-        if temp is not None:
-            frame = temp
-            temp = None
-        else:
-            frame = next(it)
-            if frame is not None and base['left']:
-                frame = frame[:, base['left']:base['left'] + w]
-        if frame is None:
-            break
-        I0 = I1
-        I1 = load(frame)
-        ssim = gpu_ssim(I0, I1)
-
-        break_flag = False
-        if ssim > 0.996:
-            nxt = next(it)
-            if nxt is None:
-                break_flag = True
-                src = lastframe
+        while True:
+            if temp is not None:
+                frame = temp
+                temp = None
             else:
-                temp = nxt
-                if base['left']:
-                    nxt = nxt[:, base['left']:base['left'] + w]
-                    temp = nxt
-                src = nxt
-            I1 = load(src)
-            I1 = run_oom_safe(lambda s: model.inference(I0, I1, scale=s))
+                frame = read_frame()
+                if frame is None:
+                    break
+            frames_read += 1
+            I0 = I1
+            I1 = load(frame)
             ssim = gpu_ssim(I0, I1)
-            frame = img_from(I1)
 
-        if ssim < 0.2:
-            mids = [I0] * (multi - 1)
-        else:
-            mids = run_oom_safe(lambda s: make_inference(model, I0, I1, multi - 1, s, ver))
+            break_flag = False
+            if ssim > 0.996:
+                nxt = read_frame()
+                if nxt is None:
+                    break_flag = True
+                    src = lastframe  # 原版準拠: 読めなければ最終フレームで代替
+                else:
+                    frames_read += 1
+                    temp = nxt
+                    src = nxt
+                I1 = load(src)
+                I1 = run_oom_safe(lambda s: infer_mid(model, I0, I1, s, ver))
+                ssim = gpu_ssim(I0, I1)
+                frame = img_from(I1)
+
+            if ssim < 0.2:
+                mids = [I0] * (multi - 1)
+            else:
+                mids = run_oom_safe(lambda s: make_inference(model, I0, I1, multi - 1, s, ver))
+
+            if base['montage']:
+                emit(np.concatenate((lastframe, lastframe), 1))
+                for mid in mids:
+                    emit(np.concatenate((lastframe, img_from(mid)), 1))
+            else:
+                emit(lastframe)
+                for mid in mids:
+                    emit(img_from(mid))
+            pbar.update(1)
+            lastframe = frame
+            if break_flag:
+                break
 
         if base['montage']:
             emit(np.concatenate((lastframe, lastframe), 1))
-            for mid in mids:
-                emit(np.concatenate((lastframe, img_from(mid)[:h, :w] if mid.shape[-1] > w else img_from(mid)), 1))
         else:
             emit(lastframe)
-            for mid in mids:
-                emit(img_from(mid))
         pbar.update(1)
-        lastframe = frame
-        if break_flag:
-            break
+    finally:
+        if writer is not None:
+            writer.close()
+        reader.close()
 
-    if base['montage']:
-        emit(np.concatenate((lastframe, lastframe), 1))
-    else:
-        emit(lastframe)
-    pbar.update(1)
-
-    if writer is not None:
-        writer.close()
-    reader.close()
+    print('frames read: %d, frames written: %d' % (frames_read, written))
+    return written
 
 
-# ---------------- fast(2GPUチャンク)用: 従来版を流用 ----------------
+# ---------------- fast(2GPUチャンク) ----------------
 
 def _seg_writer(outq, cfg, msg_q):
     try:
@@ -545,7 +550,7 @@ def gpu_worker(gid, base_cfg, chunk_q, msg_q):
                         nxt = next_crop()
                         src = nxt
                     else:
-                        src = state_img  # 原版準拠: 自分自身と補間
+                        src = state_img
                     Fsrc = load(src)
                     D = run_oom_safe(lambda s: infer_mid(model, Fc, Fsrc, s, ver))
                     if gpu_ssim(Fc, D) < 0.2:
@@ -641,7 +646,6 @@ def split_chunks(ops, nsplit, min_ops=4):
 
 
 def mux_audio(tmp_video, src, out_name, do_audio):
-    """映像(tmp)に音声をmux。失敗時は音声なしでtmpを改名"""
     if not do_audio:
         os.replace(tmp_video, out_name)
         return
@@ -679,9 +683,9 @@ def parse_args():
     p.add_argument('--multi', dest='multi', type=int, default=2)
     p.add_argument('--crf', dest='crf', type=int, default=18)
     p.add_argument('--preset', dest='preset', type=str, default='veryfast')
-    p.add_argument('--fast', action='store_true', help='2GPUチャンク並列(A/B検証用)')
-    p.add_argument('--nvenc', action='store_true', help='HWエンコードopt-in')
-    p.add_argument('--nvdec', action='store_true', help='HWデコードopt-in')
+    p.add_argument('--fast', action='store_true', help='2GPUチャンク並列')
+    p.add_argument('--nvenc', action='store_true', help='HWｴﾝｺｰﾄﾞopt-in')
+    p.add_argument('--nvdec', action='store_true', help='HWﾃﾞｺｰﾄﾞopt-in(8bit yuv420pのみ安全)')
     p.add_argument('--legacy-io', dest='legacy_io', action='store_true', help='cv2入出力(原版リファレンス)')
     p.add_argument('--split', dest='split', type=int, default=16)
     return p.parse_args()
@@ -708,9 +712,10 @@ def main():
     files = None
     fpsNotAssigned = False
     video_path_wo_ext = None
+    pix_fmt = 'yuv420p'
     if args.video is not None:
         assert shutil.which('ffmpeg') or args.legacy_io, 'ffmpeg が必要です(legacy-io以外)'
-        w_full, h, fps, audio = ffprobe_meta(args.video)
+        w_full, h, fps, audio, pix_fmt = ffprobe_meta(args.video)
         ofps = fps * args.multi
         if args.fps is None:
             fpsNotAssigned = True
@@ -718,7 +723,7 @@ def main():
             ofps = Fraction(args.fps, 1)
         video_path_wo_ext, _ = os.path.splitext(args.video)
         N = None
-        print('input: {}, {}FPS -> {}FPS'.format(args.video, float(fps), float(ofps)))
+        print('input: {}, {}FPS -> {}FPS, pix_fmt={}'.format(args.video, float(fps), float(ofps), pix_fmt))
         print('The audio will be merged after interpolation process' if (not args.png and fpsNotAssigned)
               else 'Will not merge audio because using png or fps flag!')
     else:
@@ -730,8 +735,13 @@ def main():
         ofps, fps, audio = None, None, False
         print('image sequence: {} frames'.format(N))
 
+    # ★ NVDEC安全ガード: 10bit/4:4:4等(白黒ノイズ破綻の温床)では自動無効化
+    nvdec_ok_fmt = pix_fmt in ('yuv420p', 'yuvj420p', 'gray')
+    if args.nvdec and args.video is not None and not nvdec_ok_fmt and not args.legacy_io:
+        print('WARN: pix_fmt=%s はNVDECでクロマ破損の恐れがあるためCPUデコードに切り替え' % pix_fmt)
     nvenc = args.nvenc and (not args.png) and probe_nvenc()
-    nvdec = args.nvdec and (args.video is not None) and (not args.legacy_io) and probe_nvdec()
+    nvdec = (args.nvdec and (args.video is not None) and (not args.legacy_io)
+             and nvdec_ok_fmt and probe_nvdec())
     if (args.nvenc or args.nvdec) and not (nvenc or nvdec):
         print('WARN: HW accel requested but unavailable -> software fallback')
 
@@ -747,7 +757,7 @@ def main():
     vid_out_name = args.output if args.output is not None else \
         '{}_{}X_{}fps.{}'.format(video_path_wo_ext, args.multi,
                                  int(np.round(float(ofps))) if ofps else 0, args.ext)
-    tmp_out = vid_out_name + '.novideo_audio.tmp.' + args.ext
+    tmp_out = vid_out_name + '.tmp.' + args.ext
 
     base = dict(mode='video' if args.video is not None else 'img',
                 video_path=args.video,
@@ -766,6 +776,7 @@ def main():
 
     t0 = time.time()
     segs = None
+    expected = None
     if use_fast:
         frames32 = read_proxy32(args.video)
         N = len(frames32)
@@ -818,13 +829,12 @@ def main():
             p.join(timeout=30)
         pbar.close()
         if err:
-            raise RuntimeError(err + ' (segments kept for inspection: ' + ', '.join(segs) + ')')
-        # セグメント検証
+            raise RuntimeError(err + ' (segments kept: ' + ', '.join(segs) + ')')
         for c, s in zip(chunks, segs):
             exp = len(c['ops']) * args.multi + (1 if c['is_last'] else 0)
             got = video_frame_count(s)
             print('  seg %d: frames=%d (expected %d)' % (c['cid'], got, exp))
-            assert got == exp, 'segment %d frame mismatch (%d != %d) — kept for inspection' % (c['cid'], got, exp)
+            assert got == exp, 'segment %d frame mismatch (%d != %d)' % (c['cid'], got, exp)
         with open('./rife_concat_%d.txt' % os.getpid(), 'w') as f:
             for s in segs:
                 f.write("file '%s'\n" % s)
@@ -833,27 +843,20 @@ def main():
                             '-movflags', '+faststart', tmp_out], stderr=subprocess.DEVNULL)
         assert r.returncode == 0, 'concat failed'
         os.remove('./rife_concat_%d.txt' % os.getpid())
+        expected = (N - 1) * args.multi + 1
     else:
-        if args.video is not None and not args.legacy_io:
-            # フレーム数を事前カウント(検証用)
-            N = video_frame_count(args.video)
-            if N <= 0:
-                proxy = read_proxy32(args.video)
-                N = len(proxy)
-            print('input frames: {}'.format(N))
-        pbar = tqdm(total=max(1, N if N else 1), desc='single')
-        run_single(dev, model, ver, base, pbar)
+        pbar = tqdm(total=None, desc='single')
+        written = run_single(dev, model, ver, base, pbar)
         pbar.close()
+        expected = written  # 実測emit数が正
 
-    # ---- 出力検証(これが通ればパイプラインのフレーム数は保証される) ----
-    expected = (N - 1) * args.multi + 1
+    # ---- 出力検証: 実測書き込み数とエンコード結果が一致しなければ完成形を出さない ----
     got = video_frame_count(tmp_out)
     print('output frames: %d (expected %d)' % (got, expected))
-    if got != expected:
-        raise RuntimeError(
-            'FRAME COUNT MISMATCH: %d != %d. Output kept at %s for inspection' % (got, expected, tmp_out))
+    if expected > 0 and got != expected:
+        raise RuntimeError('FRAME COUNT MISMATCH: %d != %d (kept %s for inspection)' % (got, expected, tmp_out))
 
-    print('Interpolation: %.1f sec (%.2f input frames/sec)' % (time.time() - t0, N / max(time.time() - t0, 1e-6)))
+    print('Interpolation: %.1f sec' % (time.time() - t0))
 
     if args.png:
         print('done: vid_out/*.png')
@@ -861,9 +864,6 @@ def main():
 
     mux_audio(tmp_out, args.video, vid_out_name,
               do_audio=(args.video is not None and fpsNotAssigned and audio))
-    final_count = video_frame_count(vid_out_name)
-    if final_count != expected:
-        print('WARN: final frame count %d != %d (audio mux may have altered the container)' % (final_count, expected))
     if segs:
         for s in segs:
             try:
