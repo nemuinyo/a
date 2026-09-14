@@ -123,28 +123,6 @@ class ImageFrames:
         pass
 
 
-def _probe_pair(base_cfg):
-    """AMPセルフチェック用に実コンテンツ2フレームを取得"""
-    if base_cfg['mode'] == 'video':
-        r = VideoFrames(base_cfg['video_path'], base_cfg['h'], base_cfg['w_full'], 0, base_cfg['nvdec'])
-        it = iter(r)
-        a = next(it, None)
-        b = next(it, None)
-        r.close()
-    else:
-        a = cv2.imread(base_cfg['img_paths'][0], cv2.IMREAD_COLOR)
-        b = cv2.imread(base_cfg['img_paths'][1], cv2.IMREAD_COLOR) if len(base_cfg['img_paths']) > 1 else None
-    if a is None:
-        raise RuntimeError('probe frame read failed')
-    if base_cfg['left']:
-        a = a[:, base_cfg['left']:base_cfg['left'] + base_cfg['w']]
-        if b is not None:
-            b = b[:, base_cfg['left']:base_cfg['left'] + base_cfg['w']]
-    if b is None:
-        b = a
-    return a, b
-
-
 def _seg_writer(outq, cfg, msg_q):
     try:
         if cfg['png']:
@@ -272,7 +250,7 @@ def gpu_worker(gid, base_cfg, chunk_q, msg_q):
             x = t[0, :, :h, :w].permute(1, 2, 0).float().mul_(255.).clamp_(0, 255).byte().flip(2)  # RGB→BGR
             return x.contiguous().cpu().numpy()
 
-        # ---- 起動時メモリプローブ(★修正: fp32で実施=保守判定。旧版の base_cfg['fp32'] 参照残骸がKeyErrorの原因) ----
+        # ---- 起動時メモリプローブ(fp32で実施=保守判定) ----
         ph, pw = h + padding[3], w + padding[1]
         a = torch.zeros(1, 3, ph, pw, device=dev)
         b = torch.zeros_like(a)
@@ -290,7 +268,7 @@ def gpu_worker(gid, base_cfg, chunk_q, msg_q):
         del a, b
         torch.cuda.empty_cache()
 
-        # ---- AMPセルフチェック: 実コンテンツ2フレームで判定 ----
+        # ---- AMP: デフォルトOFF(--fp16で明示ONのみ)。高モーションで破綻するため自動判定は廃止 ----
         amp_mode = base_cfg['amp_mode']
         amp_ok = (amp_mode == 'on')
         if amp_ok:
@@ -495,7 +473,7 @@ def build_ops(frames32, multi):
 
 
 def split_chunks(ops, nsplit, min_ops=4):
-    """stateが実フレームで確定するpair/dup直後のみ切断可。★ min_opsで1-opチャンク(起動オーバーヘッド)を回避"""
+    """stateが実フレームで確定するpair/dup直後のみ切断可。min_opsで1-opチャンクを回避"""
     M = len(ops)
     if nsplit <= 1 or M == 0:
         return [(1, ops)]
@@ -523,8 +501,8 @@ def parse_args():
     parser.add_argument('--img', dest='img', type=str, default=None)
     parser.add_argument('--montage', dest='montage', action='store_true')
     parser.add_argument('--model', dest='modelDir', type=str, default='train_log')
-    parser.add_argument('--fp16', dest='fp16', action='store_true', help='チェック無視でAMP強制ON')
-    parser.add_argument('--fp32', dest='fp32', action='store_true', help='AMP無効')
+    parser.add_argument('--fp16', dest='fp16', action='store_true', help='AMP fp16を強制ON(高モーションで破綻の可能性)')
+    parser.add_argument('--fp32', dest='fp32', action='store_true', help='(互換用。fp16は常にOFFがデフォルト)')
     parser.add_argument('--UHD', dest='UHD', action='store_true')
     parser.add_argument('--scale', dest='scale', type=float, default=1.0)
     parser.add_argument('--fps', dest='fps', type=int, default=None)
@@ -537,7 +515,8 @@ def parse_args():
     parser.add_argument('--preset', dest='preset', type=str, default='veryfast')
     parser.add_argument('--batch', dest='batch', type=int, default=1, help='multi==2時のpair連続バッチ(2〜4)')
     parser.add_argument('--split', dest='split', type=int, default=16, help='チャンク分割数')
-    parser.add_argument('--no-nvenc', dest='no_nvenc', action='store_true', help='HWｴﾝｺｰﾄﾞ無効化')
+    parser.add_argument('--no-nvenc', dest='no_nvenc', action='store_true', help='HWｴﾝｺｰﾄﾞ無効化(libx264使用)')
+    parser.add_argument('--no-nvdec', dest='no_nvdec', action='store_true', help='HWﾃﾞｺｰﾄﾞ無効化(CPUデコ)')
     return parser.parse_args()
 
 
@@ -551,7 +530,8 @@ def main():
     assert args.scale in [0.25, 0.5, 1.0, 2.0, 4.0]
     if args.img is not None:
         args.png = True
-    amp_mode = 'on' if args.fp16 else 'off'   # fp16は高モーションで破綻するため明示ONのみ
+    # fp16は高モーションで数値破綻するため、明示指定(--fp16)時のみ有効
+    amp_mode = 'on' if args.fp16 else 'off'
 
     assert torch.cuda.is_available(), 'GPU required'
     ngpu = args.ngpu if args.ngpu > 0 else min(2, torch.cuda.device_count())
@@ -711,7 +691,7 @@ def main():
             ok = r.returncode == 0 and os.path.getsize(vid_out_name) > 0
         except Exception:
             ok = False
-        if not ok:
+        if not ok:  # mkv音声(vorbis等)はmp4に入らない → AACへトランスコード
             try:
                 r = subprocess.run(['ffmpeg', '-v', 'error', '-y', '-nostdin', '-f', 'concat', '-safe', '0',
                                     '-i', listf, '-i', args.video, '-map', '0:v:0', '-map', '1:a:0',
