@@ -19,16 +19,26 @@ class FFmpegReader:
             ['ffmpeg', '-v', 'error', '-nostdin', '-threads', '2', '-i', path,
              '-map', '0:v:0', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        self._done = False
+
     def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._done:
+            raise StopIteration
         n = self.fb
-        while True:
-            buf = bytearray(n); v = memoryview(buf); got = 0
-            while got < n:
-                r = self.p.stdout.readinto(v[got:])
-                if not r:
-                    return
-                got += r
-            yield np.frombuffer(buf, dtype=np.uint8).reshape(self.h, self.w, 3)
+        buf = bytearray(n)
+        v = memoryview(buf)
+        got = 0
+        while got < n:
+            r = self.p.stdout.readinto(v[got:])
+            if not r:
+                self._done = True
+                raise StopIteration
+            got += r
+        return np.frombuffer(buf, dtype=np.uint8).reshape(self.h, self.w, 3)
+
     def close(self):
         try:
             self.p.stdout.close(); self.p.terminate(); self.p.wait()
