@@ -1,0 +1,1021 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Animate QR — Fountain File Transfer</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --line:#2a3240; --fg:#e6edf3;
+    --muted:#8b98a8; --acc:#3fb950; --acc2:#58a6ff; --warn:#d29922; --err:#f85149;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--fg);
+    font-family:system-ui,-apple-system,"Segoe UI","Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif;
+    -webkit-text-size-adjust:100%;
+  }
+  header{padding:14px 16px 10px;text-align:center;border-bottom:1px solid var(--line)}
+  header h1{margin:0;font-size:17px;letter-spacing:.5px}
+  header .sub{margin-top:3px;font-size:11.5px;color:var(--muted)}
+  nav{display:flex;gap:8px;justify-content:center;padding:10px 12px}
+  nav button{
+    flex:0 0 auto;padding:8px 24px;border-radius:999px;border:1px solid var(--line);
+    background:var(--panel);color:var(--muted);font-size:13.5px;cursor:pointer;transition:.15s;
+  }
+  nav button.active{background:var(--acc);border-color:var(--acc);color:#04160a;font-weight:700}
+  main{max-width:560px;margin:0 auto;padding:0 12px 40px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:13px;margin-bottom:11px}
+  .center{text-align:center}
+  .row{display:flex;align-items:center;gap:10px;padding:6px 0;font-size:13px}
+  .row label{flex:0 0 108px;color:var(--muted)}
+  .row input[type=range]{flex:1;accent-color:var(--acc);min-width:0}
+  .row .val{flex:0 0 62px;text-align:right;font-variant-numeric:tabular-nums}
+  .row select{
+    background:#0d1117;color:var(--fg);border:1px solid var(--line);
+    border-radius:8px;padding:6px 10px;font-size:13px;
+  }
+  .drop{
+    display:flex;align-items:center;justify-content:center;gap:8px;
+    min-height:70px;border:2px dashed var(--line);border-radius:12px;
+    color:var(--muted);font-size:13.5px;cursor:pointer;transition:.15s;text-align:center;padding:10px;
+  }
+  .drop:hover,.drop.over{border-color:var(--acc);color:var(--acc);background:rgba(63,185,80,.06)}
+  canvas#qrCanvas{
+    width:100%;max-width:390px;height:auto;aspect-ratio:1/1;
+    border-radius:12px;background:#fff;image-rendering:pixelated;display:block;margin:0 auto;
+  }
+  .status{margin-top:9px;font-size:12.5px;color:var(--muted);min-height:18px;word-break:break-all}
+  .btns{display:flex;gap:9px;justify-content:center;margin-top:11px;flex-wrap:wrap}
+  button.act{
+    padding:10px 22px;border-radius:10px;border:1px solid var(--line);
+    background:#21262d;color:var(--fg);font-size:13.5px;cursor:pointer;transition:.15s;
+  }
+  button.act:disabled{opacity:.4;cursor:not-allowed}
+  button.act.primary{background:var(--acc);border-color:var(--acc);color:#04160a;font-weight:700}
+  button.act.primary:disabled{background:#238636;color:#8b949e}
+
+  /* ---- カメラ ---- */
+  .camera-card{padding:10px}
+  .video-wrap{
+    position:relative;width:100%;max-width:480px;margin:0 auto;
+    border-radius:12px;overflow:hidden;background:#000;
+    transition:box-shadow .15s;
+  }
+  .video-wrap.flash{box-shadow:0 0 0 3px var(--acc) inset}
+  .video-wrap:fullscreen{max-width:none;border-radius:0}
+  #video{
+    width:100%;display:block;background:#000;
+    object-fit:cover;aspect-ratio:4/3;
+  }
+  @media (max-width:640px){
+    #video{aspect-ratio:auto;height:36vh}
+  }
+  .video-overlay{
+    position:absolute;inset:0;display:flex;flex-direction:column;justify-content:space-between;
+    padding:8px 10px;pointer-events:none;color:#fff;font-size:12px;
+    background:linear-gradient(to bottom, rgba(0,0,0,.55), transparent 25%, transparent 65%, rgba(0,0,0,.8));
+  }
+  .ov-top{display:flex;justify-content:space-between;align-items:center}
+  .ov-top .st{font-weight:600;text-shadow:0 1px 3px rgba(0,0,0,.9)}
+  .mini-btn{
+    pointer-events:auto;background:rgba(255,255,255,.18);border:none;color:#fff;
+    padding:4px 9px;border-radius:6px;font-size:14px;cursor:pointer;line-height:1;
+  }
+  .ov-name{font-weight:600;margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-shadow:0 1px 3px rgba(0,0,0,.9)}
+  .ov-bar{height:5px;border-radius:99px;background:rgba(255,255,255,.3);overflow:hidden}
+  .ov-bar i{display:block;height:100%;width:0;background:var(--acc);transition:width .2s}
+  .ov-meta{margin-top:4px;opacity:.92;text-shadow:0 1px 3px rgba(0,0,0,.9)}
+
+  .hint{margin-top:9px;font-size:11px;color:var(--warn);line-height:1.5;text-align:center}
+
+  /* ---- 受信リスト ---- */
+  h3{margin:0 0 9px;font-size:13.5px;color:var(--fg);font-weight:600}
+  .list .empty{font-size:13px;color:var(--muted);text-align:center;padding:14px 0}
+  .item{border-top:1px solid var(--line);padding:11px 0}
+  .item:first-child{border-top:none}
+  .item-top{display:flex;justify-content:space-between;gap:10px;font-size:13px;margin-bottom:6px}
+  .item-top .name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .item-top .pct{color:var(--acc2);font-variant-numeric:tabular-nums;flex:0 0 auto}
+  .item.done .pct{color:var(--acc)}
+  .bar{height:6px;border-radius:99px;background:#0d1117;overflow:hidden}
+  .bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--acc2),var(--acc));transition:width .15s}
+  .meta{margin-top:5px;font-size:11.5px;color:var(--muted)}
+  .dl{
+    display:inline-block;margin-top:8px;padding:8px 16px;border-radius:8px;
+    background:var(--acc2);color:#00111f;font-weight:700;font-size:13px;text-decoration:none;
+  }
+  footer{text-align:center;font-size:11px;color:#4a5563;padding:0 20px 30px;line-height:1.7}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>📡 Animate QR — Fountain File Transfer</h1>
+  <div class="sub">圧縮 → ファウンテン符号 → アニメQR → SHA-256検証</div>
+</header>
+
+<nav>
+  <button id="tabSend" class="active">送信</button>
+  <button id="tabRecv">受信</button>
+</nav>
+
+<main>
+  <!-- ============ 送信 ============ -->
+  <section id="paneSend">
+    <div class="card">
+      <label class="drop" id="dropZone">
+        <input type="file" id="fileInput" hidden>
+        <span id="fileLabel">クリック / ドロップでファイルを選択</span>
+      </label>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <label>ブロックサイズ</label>
+        <input type="range" id="chunkRange" min="100" max="1200" step="50" value="400">
+        <span class="val" id="chunkVal">400 B</span>
+      </div>
+      <div class="row">
+        <label>表示速度</label>
+        <input type="range" id="fpsRange" min="1" max="20" step="1" value="8">
+        <span class="val" id="fpsVal">8 fps</span>
+      </div>
+      <div class="row">
+        <label>誤り訂正</label>
+        <select id="ecSel">
+          <option value="L">L（容量大）</option>
+          <option value="M" selected>M（標準）</option>
+          <option value="Q">Q（高）</option>
+          <option value="H">H（最高）</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="card center">
+      <canvas id="qrCanvas" width="600" height="600"></canvas>
+      <div class="status" id="sendStatus">ファイルを選択してください</div>
+      <div class="btns">
+        <button class="act primary" id="startBtn" disabled>▶ 再生</button>
+        <button class="act" id="stopBtn" disabled>■ 停止</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 受信 ============ -->
+  <section id="paneRecv" hidden>
+    <div class="card camera-card">
+      <div class="video-wrap" id="videoWrap">
+        <video id="video" playsinline autoplay muted></video>
+        <div class="video-overlay">
+          <div class="ov-top">
+            <span class="st" id="ovStatus">カメラ停止中</span>
+            <button class="mini-btn" id="expandBtn" title="全画面">⛶</button>
+          </div>
+          <div class="ov-bottom">
+            <div class="ov-name" id="ovName">—</div>
+            <div class="ov-bar"><i id="ovBar"></i></div>
+            <div class="ov-meta" id="ovMeta">待機中</div>
+          </div>
+        </div>
+      </div>
+      <canvas id="scanCanvas" style="display:none"></canvas>
+      <div class="btns">
+        <button class="act primary" id="camBtn">📷 カメラ開始</button>
+        <button class="act" id="camStopBtn" disabled>■ 停止</button>
+      </div>
+      <div class="hint">※ カメラは HTTPS または localhost でのみ動作します</div>
+    </div>
+
+    <div class="card">
+      <h3>受信状況</h3>
+      <div class="list" id="recvList">
+        <div class="empty">まだ受信していません</div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  送信側「再生」→ 受信側でカメラを向けるだけ。<br>
+  フレームはループし、冗長パケットが欠損を自動修復します。
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<script>
+/* =========================================================
+   Utilities
+   ========================================================= */
+const $ = id => document.getElementById(id);
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+
+function bytesToB64(bytes){
+  let s = '';
+  const CH = 0x8000;
+  for (let i = 0; i < bytes.length; i += CH){
+    s += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+  }
+  return btoa(s);
+}
+function b64ToBytes(b64){
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+const strToB64 = s => bytesToB64(enc.encode(s));
+const b64ToStr = b => dec.decode(b64ToBytes(b));
+
+function fmtBytes(n){
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1048576).toFixed(2) + ' MB';
+}
+function randId(){
+  const A = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let s = '';
+  for (let i = 0; i < 6; i++) s += A[Math.floor(Math.random() * A.length)];
+  return s;
+}
+
+/* 決定的PRNG（送受信で同一のシード → 同一の系列） */
+function mulberry32(a){
+  return function(){
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+function xorInPlace(dst, src){
+  for (let i = 0; i < dst.length; i++) dst[i] ^= src[i];
+}
+
+async function sha256Hex(bytes){
+  if (!crypto || !crypto.subtle) return 'unavailable';
+  const buf = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function gzipBytes(bytes){
+  const cs = new CompressionStream('gzip');
+  const stream = new Blob([bytes.slice()]).stream().pipeThrough(cs);
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+async function gunzipBytes(bytes){
+  const ds = new DecompressionStream('gzip');
+  const stream = new Blob([bytes.slice()]).stream().pipeThrough(ds);
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+/* =========================================================
+   Fountain code（ロバストソリトン + LT ピーリング）
+   ========================================================= */
+function buildDegreeCDF(K){
+  if (K <= 0) return new Float64Array([1]);
+  if (K < 8){
+    const cdf = new Float64Array(K);
+    for (let d = 1; d <= K; d++) cdf[d - 1] = d / K;
+    return cdf;
+  }
+  const c = 0.03, delta = 0.5;
+  const R = c * Math.log(K / delta) * Math.sqrt(K);
+  const Kr = Math.max(1, Math.min(K, Math.floor(K / R)));
+
+  const rho = new Float64Array(K + 1);
+  rho[1] = 1 / K;
+  for (let d = 2; d <= K; d++) rho[d] = 1 / (d * (d - 1));
+
+  const tau = new Float64Array(K + 1);
+  for (let d = 1; d < Kr; d++) tau[d] = R / (d * K);
+  if (Kr <= K) tau[Kr] = R * Math.log(R / delta) / K;
+
+  let sum = 0;
+  const cdf = new Float64Array(K);
+  for (let d = 1; d <= K; d++){
+    sum += rho[d] + tau[d];
+    cdf[d - 1] = sum;
+  }
+  for (let i = 0; i < K; i++) cdf[i] /= sum;
+  return cdf;
+}
+
+function pickDegree(rng, cdf){
+  const u = rng();
+  for (let i = 0; i < cdf.length; i++){
+    if (u <= cdf[i]) return i + 1;
+  }
+  return cdf.length;
+}
+
+/* 部分Fisher-Yatesで degree 個の一意なインデックス */
+function pickIndices(rng, K, degree){
+  degree = Math.min(degree, K);
+  const arr = new Array(K);
+  for (let i = 0; i < K; i++) arr[i] = i;
+  for (let i = 0; i < degree; i++){
+    const j = i + Math.floor(rng() * (K - i));
+    const t = arr[i]; arr[i] = arr[j]; arr[j] = t;
+  }
+  return arr.slice(0, degree);
+}
+
+/* =========================================================
+   Tab 切替
+   ========================================================= */
+$('tabSend').onclick = () => {
+  $('tabSend').classList.add('active');
+  $('tabRecv').classList.remove('active');
+  $('paneSend').hidden = false;
+  $('paneRecv').hidden = true;
+};
+$('tabRecv').onclick = () => {
+  $('tabRecv').classList.add('active');
+  $('tabSend').classList.remove('active');
+  $('paneRecv').hidden = false;
+  $('paneSend').hidden = true;
+};
+
+/* =========================================================
+   送信側
+   ========================================================= */
+const S = {
+  id: '', name: '', type: '',
+  origSize: 0, compSize: 0, compressed: false,
+  sha: '',
+  blockSize: 400, K: 0, blocks: [], cdf: null,
+  compBytes: null, ready: false,
+  ec: 'M', fps: 8,
+  tick: 0, sysIdx: 0, fountainSeed: 1, fountainCount: 0, curDesc: '',
+  running: false, raf: null, last: 0,
+};
+
+const qrCanvas = $('qrCanvas');
+const qrCtx = qrCanvas.getContext('2d');
+
+function drawPlaceholder(){
+  qrCtx.fillStyle = '#0d1117';
+  qrCtx.fillRect(0, 0, qrCanvas.width, qrCanvas.height);
+  qrCtx.fillStyle = '#2a3240';
+  qrCtx.textAlign = 'center';
+  qrCtx.textBaseline = 'middle';
+  qrCtx.font = 'bold 70px system-ui, sans-serif';
+  qrCtx.fillText('QR', qrCanvas.width / 2, qrCanvas.height / 2);
+}
+drawPlaceholder();
+
+/* --- フレーム文字列 --- */
+function metaString(){
+  const name = S.name.slice(0, 200);
+  return `M2|${S.id}|${strToB64(name)}|${S.origSize}|${S.compSize}|${S.blockSize}|${S.K}|${S.compressed ? 1 : 0}|${strToB64(S.type)}|${S.sha}`;
+}
+function sysString(idx){
+  return `D2|${S.id}|S|${idx}|${bytesToB64(S.blocks[idx])}`;
+}
+function fountainString(seed){
+  const rng = mulberry32(seed);
+  const degree = pickDegree(rng, S.cdf);
+  const indices = pickIndices(rng, S.K, degree);
+  const payload = new Uint8Array(S.blockSize);
+  for (const i of indices) xorInPlace(payload, S.blocks[i]);
+  return `D2|${S.id}|F|${seed}|${bytesToB64(payload)}`;
+}
+
+function nextFrameString(){
+  const metaEvery = Math.max(5, Math.min(40, Math.round(S.fps * 2.5)));
+  if (S.tick % metaEvery === 0){
+    S.tick++;
+    S.curDesc = 'メタデータ';
+    return metaString();
+  }
+  let s;
+  if (S.sysIdx < S.K){
+    const i = S.sysIdx++;
+    S.curDesc = `データ ${i + 1}/${S.K}`;
+    s = sysString(i);
+  } else {
+    const seed = S.fountainSeed++;
+    S.curDesc = `冗長パケット #${seed}`;
+    s = fountainString(seed);
+    S.fountainCount++;
+    if (S.fountainCount >= S.K && S.K > 0){
+      S.sysIdx = 0;
+      S.fountainCount = 0;
+    }
+  }
+  S.tick++;
+  return s;
+}
+
+/* --- QR描画 --- */
+function drawQR(text){
+  try {
+    const qr = qrcode(0, S.ec);
+    qr.addData(text, 'Byte');
+    qr.make();
+
+    const n = qr.getModuleCount();
+    const quiet = 4;
+    const totalM = n + quiet * 2;
+    const size = qrCanvas.width;
+    const cell = Math.max(1, Math.floor(size / totalM));
+    const drawSize = cell * totalM;
+    const off = Math.floor((size - drawSize) / 2);
+
+    qrCtx.fillStyle = '#ffffff';
+    qrCtx.fillRect(0, 0, size, size);
+    qrCtx.fillStyle = '#000000';
+    for (let r = 0; r < n; r++){
+      for (let c = 0; c < n; c++){
+        if (qr.isDark(r, c)){
+          qrCtx.fillRect(off + (c + quiet) * cell, off + (r + quiet) * cell, cell, cell);
+        }
+      }
+    }
+    return true;
+  } catch (e){
+    console.error(e);
+    $('sendStatus').textContent = '⚠ データがQRに収まりません。ブロックサイズを小さく / 誤り訂正を下げてください';
+    stopPlay();
+    return false;
+  }
+}
+
+function drawNext(){
+  if (!S.ready) return;
+  const text = nextFrameString();
+  if (drawQR(text)){
+    $('sendStatus').textContent =
+      `${S.curDesc}  —  ${S.name}（${fmtBytes(S.origSize)}）`;
+  }
+}
+
+/* --- アニメーション --- */
+function loop(ts){
+  if (!S.running) return;
+  const interval = 1000 / S.fps;
+  if (ts - S.last >= interval){
+    S.last = ts;
+    drawNext();
+  }
+  if (S.running) S.raf = requestAnimationFrame(loop);
+}
+function startPlay(){
+  if (!S.ready) return;
+  S.running = true;
+  S.last = 0;
+  $('startBtn').disabled = true;
+  $('stopBtn').disabled = false;
+  S.raf = requestAnimationFrame(loop);
+}
+function stopPlay(){
+  S.running = false;
+  if (S.raf) cancelAnimationFrame(S.raf);
+  S.raf = null;
+  $('startBtn').disabled = !S.ready;
+  $('stopBtn').disabled = true;
+}
+
+/* --- ファイル準備 --- */
+async function prepareFile(file){
+  stopPlay();
+  S.ready = false;
+  $('startBtn').disabled = true;
+  $('sendStatus').textContent = '準備中…（圧縮 / SHA-256 / 分割）';
+
+  try {
+    const origBytes = new Uint8Array(await file.arrayBuffer());
+    const sha = await sha256Hex(origBytes);
+
+    let compBytes = origBytes;
+    let compressed = false;
+    if (typeof CompressionStream !== 'undefined' && origBytes.length > 128){
+      try {
+        const gz = await gzipBytes(origBytes);
+        if (gz.length < origBytes.length * 0.95){
+          compBytes = gz;
+          compressed = true;
+        }
+      } catch (e){ /* 圧縮失敗は無視 */ }
+    }
+
+    S.id = randId();
+    S.name = file.name;
+    S.type = file.type || 'application/octet-stream';
+    S.origSize = origBytes.length;
+    S.compSize = compBytes.length;
+    S.compressed = compressed;
+    S.sha = sha;
+    S.compBytes = compBytes;
+    S.blockSize = +$('chunkRange').value;
+    S.ec = $('ecSel').value;
+
+    rebuildBlocks();
+    $('fileLabel').textContent =
+      `${S.name}（${fmtBytes(S.origSize)}${compressed ? ' → ' + fmtBytes(S.compSize) + ' 圧縮' : ''}）`;
+
+    const cycleSec = (S.K / S.fps).toFixed(1);
+    $('sendStatus').textContent =
+      `準備完了 — ${S.K} ブロック × ${S.blockSize} B　（1周 約${cycleSec}秒）`;
+    $('startBtn').disabled = false;
+  } catch (e){
+    console.error(e);
+    $('sendStatus').textContent = '準備エラー: ' + e.message;
+  }
+}
+
+function rebuildBlocks(){
+  if (!S.compBytes) return;
+  const bs = S.blockSize;
+  const K = Math.max(1, Math.ceil(S.compBytes.length / bs));
+  const blocks = [];
+  for (let i = 0; i < K; i++){
+    const b = new Uint8Array(bs);
+    const start = i * bs;
+    const end = Math.min(start + bs, S.compBytes.length);
+    if (end > start) b.set(S.compBytes.subarray(start, end));
+    blocks.push(b);
+  }
+  S.K = K;
+  S.blocks = blocks;
+  S.cdf = buildDegreeCDF(K);
+  S.tick = 0;
+  S.sysIdx = 0;
+  S.fountainSeed = 1;
+  S.fountainCount = 0;
+  S.ready = true;
+}
+
+/* --- 送信UIイベント --- */
+function estimateMaxChunk(ec){
+  const caps = { L: 2900, M: 2280, Q: 1620, H: 1230 };
+  return Math.floor((caps[ec] - 80) * 3 / 4);
+}
+function updateChunkMax(){
+  const max = Math.min(1200, estimateMaxChunk(S.ec));
+  $('chunkRange').max = max;
+  if (S.blockSize > max){
+    S.blockSize = max;
+    $('chunkRange').value = max;
+    $('chunkVal').textContent = max + ' B';
+    if (S.compBytes) rebuildBlocks();
+  }
+}
+
+const drop = $('dropZone');
+drop.addEventListener('click', () => $('fileInput').click());
+$('fileInput').addEventListener('change', e => {
+  const f = e.target.files[0];
+  if (f) prepareFile(f);
+});
+['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => {
+  e.preventDefault();
+  drop.classList.add('over');
+}));
+['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => {
+  e.preventDefault();
+  drop.classList.remove('over');
+}));
+drop.addEventListener('drop', e => {
+  const f = e.dataTransfer.files && e.dataTransfer.files[0];
+  if (f) prepareFile(f);
+});
+
+$('chunkRange').addEventListener('input', e => {
+  S.blockSize = +e.target.value;
+  $('chunkVal').textContent = S.blockSize + ' B';
+  if (S.compBytes){
+    stopPlay();
+    rebuildBlocks();
+    drawNext();
+    const cycleSec = (S.K / S.fps).toFixed(1);
+    $('sendStatus').textContent =
+      `準備完了 — ${S.K} ブロック × ${S.blockSize} B　（1周 約${cycleSec}秒）`;
+  }
+});
+$('fpsRange').addEventListener('input', e => {
+  S.fps = +e.target.value;
+  $('fpsVal').textContent = S.fps + ' fps';
+});
+$('ecSel').addEventListener('change', e => {
+  S.ec = e.target.value;
+  updateChunkMax();
+  if (S.compBytes){
+    stopPlay();
+    drawNext();
+  }
+});
+$('startBtn').onclick = startPlay;
+$('stopBtn').onclick = stopPlay;
+
+/* 初期化 */
+updateChunkMax();
+
+/* =========================================================
+   受信側
+   ========================================================= */
+const R = {
+  transfers: new Map(),
+  stream: null,
+  running: false,
+  lastActiveId: null,
+};
+
+const video = $('video');
+const scanCanvas = $('scanCanvas');
+const scanCtx = scanCanvas.getContext('2d', { willReadFrequently: true });
+
+/* --- 転送オブジェクト --- */
+function getTransfer(id){
+  if (R.transfers.has(id)) return R.transfers.get(id);
+
+  const el = document.createElement('div');
+  el.className = 'item';
+  el.innerHTML = `
+    <div class="item-top">
+      <span class="name">受信中…</span>
+      <span class="pct">0%</span>
+    </div>
+    <div class="bar"><i></i></div>
+    <div class="meta">0 / 0 ブロック</div>
+    <div class="linkwrap"></div>
+  `;
+  const list = $('recvList');
+  const empty = list.querySelector('.empty');
+  if (empty) empty.remove();
+  list.prepend(el);
+
+  const t = {
+    id, meta: null,
+    solved: new Map(),
+    pending: [],
+    indexMap: new Map(),
+    seenSeeds: new Set(),
+    rawFountain: null,
+    cdf: null,
+    done: false,
+    el,
+    nameEl: el.querySelector('.name'),
+    pctEl: el.querySelector('.pct'),
+    barEl: el.querySelector('.bar i'),
+    metaEl: el.querySelector('.meta'),
+    linkEl: el.querySelector('.linkwrap'),
+  };
+  R.transfers.set(id, t);
+  return t;
+}
+
+/* --- UI更新 --- */
+function updateUI(t){
+  const K = t.meta ? t.meta.K : 0;
+  const got = t.solved.size;
+  const pct = K > 0 ? Math.min(100, Math.floor(got / K * 100)) : 0;
+  t.pctEl.textContent = (t.done ? 100 : pct) + '%';
+  t.barEl.style.width = (t.done ? 100 : pct) + '%';
+  t.metaEl.textContent = `${got} / ${K} ブロック`;
+  if (t.meta) t.nameEl.textContent = t.meta.name;
+  if (R.lastActiveId === t.id) updateOverlay(t);
+}
+
+function updateOverlay(t){
+  if (!t){
+    $('ovName').textContent = '—';
+    $('ovBar').style.width = '0%';
+    $('ovMeta').textContent = R.running ? 'QRコードを探しています…' : '待機中';
+    return;
+  }
+  const K = t.meta ? t.meta.K : 0;
+  const got = t.solved.size;
+  const pct = K > 0 ? Math.min(100, Math.floor(got / K * 100)) : 0;
+  $('ovName').textContent = t.meta ? t.meta.name : '受信中…';
+  $('ovBar').style.width = (t.done ? 100 : pct) + '%';
+  $('ovMeta').textContent = t.done
+    ? '✓ 受信完了'
+    : `${got} / ${K} ブロック (${pct}%)`;
+}
+
+/* --- スキャン結果 --- */
+function handleScan(text){
+  if (!text || text.length < 4) return;
+  const p = text.split('|');
+
+  /* ---- メタデータ ---- */
+  if (p[0] === 'M2' && p.length >= 10){
+    const id = p[1];
+    const t = getTransfer(id);
+    R.lastActiveId = id;
+
+    if (!t.meta){
+      try {
+        t.meta = {
+          name:       b64ToStr(p[2]) || 'file',
+          origSize:   parseInt(p[3], 10) || 0,
+          compSize:   parseInt(p[4], 10) || 0,
+          blockSize:  parseInt(p[5], 10) || 0,
+          K:          parseInt(p[6], 10) || 0,
+          compressed: p[7] === '1',
+          type:       b64ToStr(p[8]) || 'application/octet-stream',
+          sha256:     p[9],
+        };
+        t.cdf = buildDegreeCDF(t.meta.K);
+      } catch (e){
+        console.error('meta parse', e);
+        return;
+      }
+      updateUI(t);
+
+      /* メタ到着前に受け取った冗長パケットを再生 */
+      if (t.rawFountain && t.rawFountain.length){
+        for (const { seed, data } of t.rawFountain){
+          processFountain(t, seed, data);
+        }
+        t.rawFountain = null;
+      }
+      checkDone(t);
+    }
+    return;
+  }
+
+  /* ---- データ ---- */
+  if (p[0] === 'D2' && p.length >= 5){
+    const id = p[1];
+    const type = p[2];
+    const n = parseInt(p[3], 10);
+    const b64 = p[4];
+    if (!Number.isFinite(n) || n < 0) return;
+
+    const t = getTransfer(id);
+    R.lastActiveId = id;
+    if (t.done) return;
+
+    let data;
+    try { data = b64ToBytes(b64); } catch (e) { return; }
+
+    if (type === 'S'){
+      if (t.solved.has(n)) return;
+      addPacket(t, [n], data);
+      updateUI(t);
+    } else if (type === 'F'){
+      if (t.seenSeeds.has(n)) return;
+      t.seenSeeds.add(n);
+
+      if (!t.meta){
+        /* メタ未到着なら保留 */
+        if (!t.rawFountain) t.rawFountain = [];
+        t.rawFountain.push({ seed: n, data });
+        if (t.rawFountain.length > 600) t.rawFountain.shift();
+        return;
+      }
+      processFountain(t, n, data);
+      updateUI(t);
+    }
+  }
+}
+
+function processFountain(t, seed, data){
+  if (!t.cdf) t.cdf = buildDegreeCDF(t.meta.K);
+  const rng = mulberry32(seed);
+  const degree = pickDegree(rng, t.cdf);
+  const indices = pickIndices(rng, t.meta.K, degree);
+  addPacket(t, indices, data);
+}
+
+/* --- ピーリングデコーダ --- */
+function addPacket(t, indices, data){
+  if (t.done) return;
+  const d = new Uint8Array(data);
+  const remaining = [];
+  for (const i of indices){
+    if (t.solved.has(i)) xorInPlace(d, t.solved.get(i));
+    else remaining.push(i);
+  }
+  if (remaining.length === 0) return;
+  if (remaining.length === 1){
+    solveBlock(t, remaining[0], d);
+    return;
+  }
+  const pkt = { indices: remaining, data: d };
+  t.pending.push(pkt);
+  for (const i of remaining){
+    let arr = t.indexMap.get(i);
+    if (!arr){ arr = []; t.indexMap.set(i, arr); }
+    arr.push(pkt);
+  }
+}
+
+function solveBlock(t, startIdx, startData){
+  const queue = [{ idx: startIdx, data: startData }];
+  let qi = 0;
+
+  while (qi < queue.length){
+    const { idx, data } = queue[qi++];
+    if (t.solved.has(idx)) continue;
+    t.solved.set(idx, data);
+
+    const list = t.indexMap.get(idx);
+    if (!list) continue;
+    t.indexMap.delete(idx);
+
+    for (const pkt of list){
+      const pos = pkt.indices.indexOf(idx);
+      if (pos < 0) continue;
+      xorInPlace(pkt.data, data);
+      pkt.indices.splice(pos, 1);
+
+      if (pkt.indices.length === 1){
+        const newIdx = pkt.indices[0];
+        pkt.indices = [];
+        const arr = t.indexMap.get(newIdx);
+        if (arr){
+          const pp = arr.indexOf(pkt);
+          if (pp >= 0) arr.splice(pp, 1);
+        }
+        queue.push({ idx: newIdx, data: pkt.data });
+      }
+    }
+  }
+  checkDone(t);
+}
+
+/* --- 完了判定 --- */
+function checkDone(t){
+  if (t.done || !t.meta) return;
+  if (t.solved.size < t.meta.K) return;
+
+  const buf = new Uint8Array(t.meta.K * t.meta.blockSize);
+  for (let i = 0; i < t.meta.K; i++){
+    const b = t.solved.get(i);
+    if (!b) return;
+    buf.set(b, i * t.meta.blockSize);
+  }
+  const compressed = buf.slice(0, t.meta.compSize);
+  finalize(t, compressed);
+}
+
+async function finalize(t, compressedBytes){
+  if (t.done) return;
+  t.done = true;
+
+  try {
+    let finalBytes = compressedBytes;
+    if (t.meta.compressed){
+      finalBytes = await gunzipBytes(compressedBytes);
+    }
+
+    let ok = true;
+    let verifyNote = '';
+    if (t.meta.sha256 && t.meta.sha256 !== 'unavailable' && crypto.subtle){
+      const hash = await sha256Hex(finalBytes);
+      ok = hash === t.meta.sha256;
+      verifyNote = ok ? '（SHA-256一致）' : '（SHA-256不一致）';
+    }
+
+    const blob = new Blob([finalBytes], { type: t.meta.type || 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+
+    t.el.classList.add('done');
+    if (!ok) t.el.classList.add('error');
+    t.pctEl.textContent = '100%';
+    t.barEl.style.width = '100%';
+    t.metaEl.textContent = ok
+      ? `✓ 受信完了 — ${fmtBytes(finalBytes.length)}${verifyNote}`
+      : `⚠ 受信完了 — ${fmtBytes(finalBytes.length)}${verifyNote}`;
+    if (!ok) t.metaEl.style.color = '#d29922';
+
+    const a = document.createElement('a');
+    a.className = 'dl';
+    a.href = url;
+    a.download = t.meta.name || 'download';
+    a.textContent = '⬇ ダウンロード';
+    t.linkEl.appendChild(a);
+
+    /* メモリ解放 */
+    t.solved.clear();
+    t.pending = [];
+    t.indexMap.clear();
+    t.seenSeeds.clear();
+
+    updateUI(t);
+  } catch (e){
+    console.error('finalize', e);
+    t.el.classList.add('error');
+    t.metaEl.textContent = '⚠ 復元エラー: ' + e.message;
+    t.metaEl.style.color = '#f85149';
+  }
+}
+
+/* =========================================================
+   カメラ
+   ========================================================= */
+async function startCamera(){
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    alert('この環境ではカメラを使えません（HTTPS または localhost が必要）');
+    return;
+  }
+  try {
+    R.stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: 'environment' },
+        width:  { ideal: 1280 },
+        height: { ideal: 720 },
+      },
+      audio: false,
+    });
+    video.srcObject = R.stream;
+    await video.play();
+
+    R.running = true;
+    $('camBtn').disabled = true;
+    $('camStopBtn').disabled = false;
+    $('ovStatus').textContent = 'スキャン中…';
+    updateOverlay(R.transfers.get(R.lastActiveId) || null);
+    scanLoop();
+  } catch (e){
+    alert('カメラ起動失敗: ' + e.message);
+  }
+}
+
+function stopCamera(){
+  R.running = false;
+  if (R.stream){
+    R.stream.getTracks().forEach(tr => tr.stop());
+    R.stream = null;
+  }
+  video.srcObject = null;
+  $('camBtn').disabled = false;
+  $('camStopBtn').disabled = true;
+  $('ovStatus').textContent = 'カメラ停止中';
+  $('ovMeta').textContent = '待機中';
+}
+
+let flashTimer = null;
+function flashScan(){
+  const el = $('videoWrap');
+  el.classList.add('flash');
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => el.classList.remove('flash'), 100);
+}
+
+function scanLoop(){
+  if (!R.running) return;
+
+  const v = video;
+  if (v.readyState === v.HAVE_ENOUGH_DATA && v.videoWidth){
+    const MAXW = 800;
+    let sw = v.videoWidth, sh = v.videoHeight;
+    if (sw > MAXW){
+      sh = Math.round(sh * MAXW / sw);
+      sw = MAXW;
+    }
+    if (scanCanvas.width !== sw || scanCanvas.height !== sh){
+      scanCanvas.width = sw;
+      scanCanvas.height = sh;
+    }
+    scanCtx.drawImage(v, 0, 0, sw, sh);
+
+    try {
+      const img = scanCtx.getImageData(0, 0, sw, sh);
+      const code = jsQR(img.data, sw, sh, { inversionAttempts: 'dontInvert' });
+      if (code && code.data){
+        handleScan(code.data);
+        flashScan();
+      }
+    } catch (e){
+      /* 描画中は無視 */
+    }
+  }
+  setTimeout(scanLoop, 50);
+}
+
+$('camBtn').onclick = startCamera;
+$('camStopBtn').onclick = stopCamera;
+
+/* 全画面トグル（オーバーレイは維持） */
+$('expandBtn').onclick = () => {
+  const el = $('videoWrap');
+  if (document.fullscreenElement){
+    document.exitFullscreen && document.exitFullscreen();
+  } else if (el.requestFullscreen){
+    el.requestFullscreen().catch(() => {});
+  }
+};
+
+/* =========================================================
+   ライブラリチェック
+   ========================================================= */
+window.addEventListener('load', () => {
+  if (typeof qrcode === 'undefined'){
+    $('sendStatus').textContent = '⚠ QR生成ライブラリの読み込みに失敗しました';
+  }
+  if (typeof jsQR === 'undefined'){
+    $('recvList').innerHTML = '<div class="empty">⚠ デコードライブラリの読み込みに失敗しました</div>';
+  }
+  updateOverlay(null);
+});
+</script>
+</body>
+</html>
