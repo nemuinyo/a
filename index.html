@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Animate QR — Fountain File Transfer</title>
+<title>Animate QR — Fountain + MultiQR</title>
 <style>
   :root{
     --bg:#0d1117; --panel:#161b22; --line:#2a3240; --fg:#e6edf3;
@@ -25,7 +25,7 @@
     background:var(--panel);color:var(--muted);font-size:13.5px;cursor:pointer;transition:.15s;
   }
   nav button.active{background:var(--acc);border-color:var(--acc);color:#04160a;font-weight:700}
-  main{max-width:560px;margin:0 auto;padding:0 12px 40px}
+  main{max-width:580px;margin:0 auto;padding:0 12px 40px}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:13px;margin-bottom:11px}
   .center{text-align:center}
   .row{display:flex;align-items:center;gap:10px;padding:6px 0;font-size:13px}
@@ -36,6 +36,11 @@
     background:#0d1117;color:var(--fg);border:1px solid var(--line);
     border-radius:8px;padding:6px 10px;font-size:13px;
   }
+  .badge{
+    display:inline-block;padding:3px 10px;border-radius:999px;font-size:11.5px;font-weight:600;
+    background:rgba(88,166,255,.15);color:var(--acc2);border:1px solid rgba(88,166,255,.35);
+  }
+  .badge.native{background:rgba(63,185,80,.15);color:var(--acc);border-color:rgba(63,185,80,.35)}
   .drop{
     display:flex;align-items:center;justify-content:center;gap:8px;
     min-height:70px;border:2px dashed var(--line);border-radius:12px;
@@ -43,7 +48,7 @@
   }
   .drop:hover,.drop.over{border-color:var(--acc);color:var(--acc);background:rgba(63,185,80,.06)}
   canvas#qrCanvas{
-    width:100%;max-width:390px;height:auto;aspect-ratio:1/1;
+    width:100%;max-width:500px;height:auto;aspect-ratio:1/1;
     border-radius:12px;background:#fff;image-rendering:pixelated;display:block;margin:0 auto;
   }
   .status{margin-top:9px;font-size:12.5px;color:var(--muted);min-height:18px;word-break:break-all}
@@ -56,29 +61,24 @@
   button.act.primary{background:var(--acc);border-color:var(--acc);color:#04160a;font-weight:700}
   button.act.primary:disabled{background:#238636;color:#8b949e}
 
-  /* ---- カメラ ---- */
   .camera-card{padding:10px}
   .video-wrap{
     position:relative;width:100%;max-width:480px;margin:0 auto;
-    border-radius:12px;overflow:hidden;background:#000;
-    transition:box-shadow .15s;
+    border-radius:12px;overflow:hidden;background:#000;transition:box-shadow .15s;
   }
   .video-wrap.flash{box-shadow:0 0 0 3px var(--acc) inset}
   .video-wrap:fullscreen{max-width:none;border-radius:0}
-  #video{
-    width:100%;display:block;background:#000;
-    object-fit:cover;aspect-ratio:4/3;
-  }
-  @media (max-width:640px){
-    #video{aspect-ratio:auto;height:36vh}
-  }
+  #video{width:100%;display:block;background:#000;object-fit:cover;aspect-ratio:4/3}
+  @media (max-width:640px){ #video{aspect-ratio:auto;height:38vh} }
   .video-overlay{
     position:absolute;inset:0;display:flex;flex-direction:column;justify-content:space-between;
     padding:8px 10px;pointer-events:none;color:#fff;font-size:12px;
-    background:linear-gradient(to bottom, rgba(0,0,0,.55), transparent 25%, transparent 65%, rgba(0,0,0,.8));
+    background:linear-gradient(to bottom, rgba(0,0,0,.55), transparent 25%, transparent 60%, rgba(0,0,0,.85));
   }
-  .ov-top{display:flex;justify-content:space-between;align-items:center}
-  .ov-top .st{font-weight:600;text-shadow:0 1px 3px rgba(0,0,0,.9)}
+  .ov-top{display:flex;justify-content:space-between;align-items:center;gap:6px}
+  .ov-top .st{font-weight:600;text-shadow:0 1px 3px rgba(0,0,0,.9);font-size:11.5px}
+  .ov-tags{display:flex;gap:4px;pointer-events:none}
+  .ov-tag{background:rgba(0,0,0,.55);padding:2px 7px;border-radius:6px;font-size:10.5px;font-weight:600}
   .mini-btn{
     pointer-events:auto;background:rgba(255,255,255,.18);border:none;color:#fff;
     padding:4px 9px;border-radius:6px;font-size:14px;cursor:pointer;line-height:1;
@@ -86,11 +86,11 @@
   .ov-name{font-weight:600;margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-shadow:0 1px 3px rgba(0,0,0,.9)}
   .ov-bar{height:5px;border-radius:99px;background:rgba(255,255,255,.3);overflow:hidden}
   .ov-bar i{display:block;height:100%;width:0;background:var(--acc);transition:width .2s}
-  .ov-meta{margin-top:4px;opacity:.92;text-shadow:0 1px 3px rgba(0,0,0,.9)}
+  .ov-meta{margin-top:4px;opacity:.92;text-shadow:0 1px 3px rgba(0,0,0,.9);font-size:11px}
 
   .hint{margin-top:9px;font-size:11px;color:var(--warn);line-height:1.5;text-align:center}
+  .hint.blue{color:var(--acc2)}
 
-  /* ---- 受信リスト ---- */
   h3{margin:0 0 9px;font-size:13.5px;color:var(--fg);font-weight:600}
   .list .empty{font-size:13px;color:var(--muted);text-align:center;padding:14px 0}
   .item{border-top:1px solid var(--line);padding:11px 0}
@@ -99,6 +99,7 @@
   .item-top .name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .item-top .pct{color:var(--acc2);font-variant-numeric:tabular-nums;flex:0 0 auto}
   .item.done .pct{color:var(--acc)}
+  .item.error .pct{color:var(--warn)}
   .bar{height:6px;border-radius:99px;background:#0d1117;overflow:hidden}
   .bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--acc2),var(--acc));transition:width .15s}
   .meta{margin-top:5px;font-size:11.5px;color:var(--muted)}
@@ -112,8 +113,8 @@
 <body>
 
 <header>
-  <h1>📡 Animate QR — Fountain File Transfer</h1>
-  <div class="sub">圧縮 → ファウンテン符号 → アニメQR → SHA-256検証</div>
+  <h1>📡 Animate QR — Fountain MultiQR</h1>
+  <div class="sub">圧縮 → ファウンテン符号 → 複数QR同時表示 → SHA-256検証</div>
 </header>
 
 <nav>
@@ -122,7 +123,6 @@
 </nav>
 
 <main>
-  <!-- ============ 送信 ============ -->
   <section id="paneSend">
     <div class="card">
       <label class="drop" id="dropZone">
@@ -133,14 +133,21 @@
 
     <div class="card">
       <div class="row">
+        <label>QR配置</label>
+        <select id="layoutSel">
+          <option value="1" selected>1×1（標準・安定）</option>
+          <option value="4">2×2（高速・画面に近づける）</option>
+        </select>
+      </div>
+      <div class="row">
         <label>ブロックサイズ</label>
         <input type="range" id="chunkRange" min="100" max="1200" step="50" value="400">
         <span class="val" id="chunkVal">400 B</span>
       </div>
       <div class="row">
         <label>表示速度</label>
-        <input type="range" id="fpsRange" min="1" max="20" step="1" value="8">
-        <span class="val" id="fpsVal">8 fps</span>
+        <input type="range" id="fpsRange" min="1" max="30" step="1" value="10">
+        <span class="val" id="fpsVal">10 fps</span>
       </div>
       <div class="row">
         <label>誤り訂正</label>
@@ -151,10 +158,13 @@
           <option value="H">H（最高）</option>
         </select>
       </div>
+      <div class="hint blue" id="layoutHint" style="display:none">
+        2×2時は 200〜300 B 推奨。カメラを画面に近づけてください。
+      </div>
     </div>
 
     <div class="card center">
-      <canvas id="qrCanvas" width="600" height="600"></canvas>
+      <canvas id="qrCanvas" width="800" height="800"></canvas>
       <div class="status" id="sendStatus">ファイルを選択してください</div>
       <div class="btns">
         <button class="act primary" id="startBtn" disabled>▶ 再生</button>
@@ -163,7 +173,6 @@
     </div>
   </section>
 
-  <!-- ============ 受信 ============ -->
   <section id="paneRecv" hidden>
     <div class="card camera-card">
       <div class="video-wrap" id="videoWrap">
@@ -171,7 +180,10 @@
         <div class="video-overlay">
           <div class="ov-top">
             <span class="st" id="ovStatus">カメラ停止中</span>
-            <button class="mini-btn" id="expandBtn" title="全画面">⛶</button>
+            <div class="ov-tags">
+              <span class="ov-tag" id="ovMode">—</span>
+              <button class="mini-btn" id="expandBtn" title="全画面">⛶</button>
+            </div>
           </div>
           <div class="ov-bottom">
             <div class="ov-name" id="ovName">—</div>
@@ -184,6 +196,10 @@
       <div class="btns">
         <button class="act primary" id="camBtn">📷 カメラ開始</button>
         <button class="act" id="camStopBtn" disabled>■ 停止</button>
+      </div>
+      <div class="row" style="justify-content:center">
+        <label style="flex:0 0 auto">スキャナ</label>
+        <span id="scanMode" class="badge">初期化中…</span>
       </div>
       <div class="hint">※ カメラは HTTPS または localhost でのみ動作します</div>
     </div>
@@ -199,7 +215,7 @@
 
 <footer>
   送信側「再生」→ 受信側でカメラを向けるだけ。<br>
-  フレームはループし、冗長パケットが欠損を自動修復します。
+  冗長パケットが欠損を自動修復し、SHA-256 で改ざん・破損を検出します。
 </footer>
 
 <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
@@ -213,8 +229,7 @@ const enc = new TextEncoder();
 const dec = new TextDecoder();
 
 function bytesToB64(bytes){
-  let s = '';
-  const CH = 0x8000;
+  let s = ''; const CH = 0x8000;
   for (let i = 0; i < bytes.length; i += CH){
     s += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
   }
@@ -236,12 +251,9 @@ function fmtBytes(n){
 }
 function randId(){
   const A = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let s = '';
-  for (let i = 0; i < 6; i++) s += A[Math.floor(Math.random() * A.length)];
+  let s = ''; for (let i = 0; i < 6; i++) s += A[Math.floor(Math.random() * A.length)];
   return s;
 }
-
-/* 決定的PRNG（送受信で同一のシード → 同一の系列） */
 function mulberry32(a){
   return function(){
     a |= 0; a = a + 0x6D2B79F5 | 0;
@@ -250,17 +262,13 @@ function mulberry32(a){
     return ((t ^ t >>> 14) >>> 0) / 4294967296;
   };
 }
-
-function xorInPlace(dst, src){
-  for (let i = 0; i < dst.length; i++) dst[i] ^= src[i];
-}
+function xorInPlace(dst, src){ for (let i = 0; i < dst.length; i++) dst[i] ^= src[i]; }
 
 async function sha256Hex(bytes){
   if (!crypto || !crypto.subtle) return 'unavailable';
   const buf = await crypto.subtle.digest('SHA-256', bytes);
   return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
 }
-
 async function gzipBytes(bytes){
   const cs = new CompressionStream('gzip');
   const stream = new Blob([bytes.slice()]).stream().pipeThrough(cs);
@@ -273,7 +281,7 @@ async function gunzipBytes(bytes){
 }
 
 /* =========================================================
-   Fountain code（ロバストソリトン + LT ピーリング）
+   Fountain code
    ========================================================= */
 function buildDegreeCDF(K){
   if (K <= 0) return new Float64Array([1]);
@@ -285,34 +293,23 @@ function buildDegreeCDF(K){
   const c = 0.03, delta = 0.5;
   const R = c * Math.log(K / delta) * Math.sqrt(K);
   const Kr = Math.max(1, Math.min(K, Math.floor(K / R)));
-
   const rho = new Float64Array(K + 1);
   rho[1] = 1 / K;
   for (let d = 2; d <= K; d++) rho[d] = 1 / (d * (d - 1));
-
   const tau = new Float64Array(K + 1);
   for (let d = 1; d < Kr; d++) tau[d] = R / (d * K);
   if (Kr <= K) tau[Kr] = R * Math.log(R / delta) / K;
-
   let sum = 0;
   const cdf = new Float64Array(K);
-  for (let d = 1; d <= K; d++){
-    sum += rho[d] + tau[d];
-    cdf[d - 1] = sum;
-  }
+  for (let d = 1; d <= K; d++){ sum += rho[d] + tau[d]; cdf[d - 1] = sum; }
   for (let i = 0; i < K; i++) cdf[i] /= sum;
   return cdf;
 }
-
 function pickDegree(rng, cdf){
   const u = rng();
-  for (let i = 0; i < cdf.length; i++){
-    if (u <= cdf[i]) return i + 1;
-  }
+  for (let i = 0; i < cdf.length; i++) if (u <= cdf[i]) return i + 1;
   return cdf.length;
 }
-
-/* 部分Fisher-Yatesで degree 個の一意なインデックス */
 function pickIndices(rng, K, degree){
   degree = Math.min(degree, K);
   const arr = new Array(K);
@@ -325,32 +322,27 @@ function pickIndices(rng, K, degree){
 }
 
 /* =========================================================
-   Tab 切替
+   Tab
    ========================================================= */
 $('tabSend').onclick = () => {
-  $('tabSend').classList.add('active');
-  $('tabRecv').classList.remove('active');
-  $('paneSend').hidden = false;
-  $('paneRecv').hidden = true;
+  $('tabSend').classList.add('active'); $('tabRecv').classList.remove('active');
+  $('paneSend').hidden = false; $('paneRecv').hidden = true;
 };
 $('tabRecv').onclick = () => {
-  $('tabRecv').classList.add('active');
-  $('tabSend').classList.remove('active');
-  $('paneRecv').hidden = false;
-  $('paneSend').hidden = true;
+  $('tabRecv').classList.add('active'); $('tabSend').classList.remove('active');
+  $('paneRecv').hidden = false; $('paneSend').hidden = true;
 };
 
 /* =========================================================
-   送信側
+   Sender
    ========================================================= */
 const S = {
   id: '', name: '', type: '',
-  origSize: 0, compSize: 0, compressed: false,
-  sha: '',
+  origSize: 0, compSize: 0, compressed: false, sha: '',
   blockSize: 400, K: 0, blocks: [], cdf: null,
   compBytes: null, ready: false,
-  ec: 'M', fps: 8,
-  tick: 0, sysIdx: 0, fountainSeed: 1, fountainCount: 0, curDesc: '',
+  ec: 'M', fps: 10, layout: 1,
+  packetCounter: 0, sysIdx: 0, fountainSeed: 1,
   running: false, raf: null, last: 0,
 };
 
@@ -361,20 +353,19 @@ function drawPlaceholder(){
   qrCtx.fillStyle = '#0d1117';
   qrCtx.fillRect(0, 0, qrCanvas.width, qrCanvas.height);
   qrCtx.fillStyle = '#2a3240';
-  qrCtx.textAlign = 'center';
-  qrCtx.textBaseline = 'middle';
-  qrCtx.font = 'bold 70px system-ui, sans-serif';
+  qrCtx.textAlign = 'center'; qrCtx.textBaseline = 'middle';
+  qrCtx.font = 'bold 90px system-ui, sans-serif';
   qrCtx.fillText('QR', qrCanvas.width / 2, qrCanvas.height / 2);
 }
 drawPlaceholder();
 
-/* --- フレーム文字列 --- */
+/* ---- パケット生成 ---- */
 function metaString(){
   const name = S.name.slice(0, 200);
-  return `M2|${S.id}|${strToB64(name)}|${S.origSize}|${S.compSize}|${S.blockSize}|${S.K}|${S.compressed ? 1 : 0}|${strToB64(S.type)}|${S.sha}`;
+  return `M2|${S.id}|${S.layout}|${strToB64(name)}|${S.origSize}|${S.compSize}|${S.blockSize}|${S.K}|${S.compressed ? 1 : 0}|${strToB64(S.type)}|${S.sha}`;
 }
 function sysString(idx){
-  return `D2|${S.id}|S|${idx}|${bytesToB64(S.blocks[idx])}`;
+  return `D2|${S.id}|${S.layout}|S|${idx}|${bytesToB64(S.blocks[idx])}`;
 }
 function fountainString(seed){
   const rng = mulberry32(seed);
@@ -382,94 +373,79 @@ function fountainString(seed){
   const indices = pickIndices(rng, S.K, degree);
   const payload = new Uint8Array(S.blockSize);
   for (const i of indices) xorInPlace(payload, S.blocks[i]);
-  return `D2|${S.id}|F|${seed}|${bytesToB64(payload)}`;
+  return `D2|${S.id}|${S.layout}|F|${seed}|${bytesToB64(payload)}`;
+}
+function nextPacket(){
+  const p = S.packetCounter++;
+  const metaEvery = Math.max(4, S.layout * 8);
+  if (p % metaEvery === 0) return metaString();
+  if (S.sysIdx < S.K) return sysString(S.sysIdx++);
+  return fountainString(S.fountainSeed++);
 }
 
-function nextFrameString(){
-  const metaEvery = Math.max(5, Math.min(40, Math.round(S.fps * 2.5)));
-  if (S.tick % metaEvery === 0){
-    S.tick++;
-    S.curDesc = 'メタデータ';
-    return metaString();
-  }
-  let s;
-  if (S.sysIdx < S.K){
-    const i = S.sysIdx++;
-    S.curDesc = `データ ${i + 1}/${S.K}`;
-    s = sysString(i);
-  } else {
-    const seed = S.fountainSeed++;
-    S.curDesc = `冗長パケット #${seed}`;
-    s = fountainString(seed);
-    S.fountainCount++;
-    if (S.fountainCount >= S.K && S.K > 0){
-      S.sysIdx = 0;
-      S.fountainCount = 0;
-    }
-  }
-  S.tick++;
-  return s;
-}
+/* ---- マルチQR描画 ---- */
+function drawMultiQR(packets){
+  const cols = Math.round(Math.sqrt(S.layout));
+  const size = qrCanvas.width;
+  const tile = size / cols;
 
-/* --- QR描画 --- */
-function drawQR(text){
-  try {
-    const qr = qrcode(0, S.ec);
-    qr.addData(text, 'Byte');
-    qr.make();
+  qrCtx.fillStyle = '#ffffff';
+  qrCtx.fillRect(0, 0, size, size);
 
-    const n = qr.getModuleCount();
-    const quiet = 4;
-    const totalM = n + quiet * 2;
-    const size = qrCanvas.width;
-    const cell = Math.max(1, Math.floor(size / totalM));
-    const drawSize = cell * totalM;
-    const off = Math.floor((size - drawSize) / 2);
-
-    qrCtx.fillStyle = '#ffffff';
-    qrCtx.fillRect(0, 0, size, size);
-    qrCtx.fillStyle = '#000000';
-    for (let r = 0; r < n; r++){
-      for (let c = 0; c < n; c++){
-        if (qr.isDark(r, c)){
-          qrCtx.fillRect(off + (c + quiet) * cell, off + (r + quiet) * cell, cell, cell);
+  for (let i = 0; i < packets.length; i++){
+    const r = Math.floor(i / cols);
+    const c = i % cols;
+    const x0 = c * tile, y0 = r * tile;
+    try {
+      const qr = qrcode(0, S.ec);
+      qr.addData(packets[i], 'Byte');
+      qr.make();
+      const n = qr.getModuleCount();
+      const quiet = 2;
+      const totalM = n + quiet * 2;
+      const cell = Math.max(1, Math.floor(tile / totalM));
+      const drawSize = cell * totalM;
+      if (drawSize > tile){
+        // タイルに収まらない → スキップ
+        continue;
+      }
+      const offX = x0 + Math.floor((tile - drawSize) / 2);
+      const offY = y0 + Math.floor((tile - drawSize) / 2);
+      qrCtx.fillStyle = '#000000';
+      for (let yy = 0; yy < n; yy++){
+        for (let xx = 0; xx < n; xx++){
+          if (qr.isDark(yy, xx)){
+            qrCtx.fillRect(offX + (xx + quiet) * cell, offY + (yy + quiet) * cell, cell, cell);
+          }
         }
       }
-    }
-    return true;
-  } catch (e){
-    console.error(e);
-    $('sendStatus').textContent = '⚠ データがQRに収まりません。ブロックサイズを小さく / 誤り訂正を下げてください';
-    stopPlay();
-    return false;
+    } catch (e){ /* 1タイル失敗は無視 */ }
   }
 }
 
 function drawNext(){
   if (!S.ready) return;
-  const text = nextFrameString();
-  if (drawQR(text)){
-    $('sendStatus').textContent =
-      `${S.curDesc}  —  ${S.name}（${fmtBytes(S.origSize)}）`;
-  }
+  const N = S.layout;
+  const packets = [];
+  for (let i = 0; i < N; i++) packets.push(nextPacket());
+  drawMultiQR(packets);
+  const sys = Math.min(S.sysIdx, S.K);
+  const fnt = Math.max(0, S.fountainSeed - 1);
+  $('sendStatus').textContent =
+    `${S.name}（${fmtBytes(S.origSize)}） — 系統 ${sys}/${S.K} + 冗長 ${fnt}`;
 }
 
-/* --- アニメーション --- */
+/* ---- ループ ---- */
 function loop(ts){
   if (!S.running) return;
   const interval = 1000 / S.fps;
-  if (ts - S.last >= interval){
-    S.last = ts;
-    drawNext();
-  }
+  if (ts - S.last >= interval){ S.last = ts; drawNext(); }
   if (S.running) S.raf = requestAnimationFrame(loop);
 }
 function startPlay(){
   if (!S.ready) return;
-  S.running = true;
-  S.last = 0;
-  $('startBtn').disabled = true;
-  $('stopBtn').disabled = false;
+  S.running = true; S.last = 0;
+  $('startBtn').disabled = true; $('stopBtn').disabled = false;
   S.raf = requestAnimationFrame(loop);
 }
 function stopPlay(){
@@ -480,7 +456,7 @@ function stopPlay(){
   $('stopBtn').disabled = true;
 }
 
-/* --- ファイル準備 --- */
+/* ---- 準備 ---- */
 async function prepareFile(file){
   stopPlay();
   S.ready = false;
@@ -491,16 +467,12 @@ async function prepareFile(file){
     const origBytes = new Uint8Array(await file.arrayBuffer());
     const sha = await sha256Hex(origBytes);
 
-    let compBytes = origBytes;
-    let compressed = false;
+    let compBytes = origBytes, compressed = false;
     if (typeof CompressionStream !== 'undefined' && origBytes.length > 128){
       try {
         const gz = await gzipBytes(origBytes);
-        if (gz.length < origBytes.length * 0.95){
-          compBytes = gz;
-          compressed = true;
-        }
-      } catch (e){ /* 圧縮失敗は無視 */ }
+        if (gz.length < origBytes.length * 0.95){ compBytes = gz; compressed = true; }
+      } catch (e){}
     }
 
     S.id = randId();
@@ -513,6 +485,7 @@ async function prepareFile(file){
     S.compBytes = compBytes;
     S.blockSize = +$('chunkRange').value;
     S.ec = $('ecSel').value;
+    S.layout = +$('layoutSel').value;
 
     rebuildBlocks();
     $('fileLabel').textContent =
@@ -535,28 +508,25 @@ function rebuildBlocks(){
   const blocks = [];
   for (let i = 0; i < K; i++){
     const b = new Uint8Array(bs);
-    const start = i * bs;
-    const end = Math.min(start + bs, S.compBytes.length);
+    const start = i * bs, end = Math.min(start + bs, S.compBytes.length);
     if (end > start) b.set(S.compBytes.subarray(start, end));
     blocks.push(b);
   }
-  S.K = K;
-  S.blocks = blocks;
+  S.K = K; S.blocks = blocks;
   S.cdf = buildDegreeCDF(K);
-  S.tick = 0;
-  S.sysIdx = 0;
-  S.fountainSeed = 1;
-  S.fountainCount = 0;
+  S.packetCounter = 0; S.sysIdx = 0; S.fountainSeed = 1;
   S.ready = true;
 }
 
-/* --- 送信UIイベント --- */
+/* ---- UI ---- */
 function estimateMaxChunk(ec){
   const caps = { L: 2900, M: 2280, Q: 1620, H: 1230 };
   return Math.floor((caps[ec] - 80) * 3 / 4);
 }
 function updateChunkMax(){
-  const max = Math.min(1200, estimateMaxChunk(S.ec));
+  const layoutMax = S.layout > 1 ? 400 : 1200;
+  const ecMax = estimateMaxChunk(S.ec);
+  const max = Math.min(layoutMax, ecMax);
   $('chunkRange').max = max;
   if (S.blockSize > max){
     S.blockSize = max;
@@ -569,16 +539,13 @@ function updateChunkMax(){
 const drop = $('dropZone');
 drop.addEventListener('click', () => $('fileInput').click());
 $('fileInput').addEventListener('change', e => {
-  const f = e.target.files[0];
-  if (f) prepareFile(f);
+  const f = e.target.files[0]; if (f) prepareFile(f);
 });
-['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => {
-  e.preventDefault();
-  drop.classList.add('over');
+['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, e => {
+  e.preventDefault(); drop.classList.add('over');
 }));
-['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => {
-  e.preventDefault();
-  drop.classList.remove('over');
+['dragleave','drop'].forEach(ev => drop.addEventListener(ev, e => {
+  e.preventDefault(); drop.classList.remove('over');
 }));
 drop.addEventListener('drop', e => {
   const f = e.dataTransfer.files && e.dataTransfer.files[0];
@@ -588,14 +555,7 @@ drop.addEventListener('drop', e => {
 $('chunkRange').addEventListener('input', e => {
   S.blockSize = +e.target.value;
   $('chunkVal').textContent = S.blockSize + ' B';
-  if (S.compBytes){
-    stopPlay();
-    rebuildBlocks();
-    drawNext();
-    const cycleSec = (S.K / S.fps).toFixed(1);
-    $('sendStatus').textContent =
-      `準備完了 — ${S.K} ブロック × ${S.blockSize} B　（1周 約${cycleSec}秒）`;
-  }
+  if (S.compBytes){ stopPlay(); rebuildBlocks(); drawNext(); }
 });
 $('fpsRange').addEventListener('input', e => {
   S.fps = +e.target.value;
@@ -604,32 +564,133 @@ $('fpsRange').addEventListener('input', e => {
 $('ecSel').addEventListener('change', e => {
   S.ec = e.target.value;
   updateChunkMax();
-  if (S.compBytes){
-    stopPlay();
-    drawNext();
+  if (S.compBytes){ stopPlay(); drawNext(); }
+});
+$('layoutSel').addEventListener('change', e => {
+  S.layout = +e.target.value;
+  $('layoutHint').style.display = S.layout > 1 ? 'block' : 'none';
+  if (S.layout > 1 && S.blockSize > 300){
+    S.blockSize = 250;
+    $('chunkRange').value = 250;
+    $('chunkVal').textContent = '250 B';
   }
+  updateChunkMax();
+  if (S.compBytes){ stopPlay(); rebuildBlocks(); drawNext(); }
 });
 $('startBtn').onclick = startPlay;
-$('stopBtn').onclick = stopPlay;
-
-/* 初期化 */
+$('stopBtn').onclick  = stopPlay;
 updateChunkMax();
 
 /* =========================================================
-   受信側
+   Receiver
    ========================================================= */
 const R = {
   transfers: new Map(),
   stream: null,
   running: false,
   lastActiveId: null,
+  detector: null,
+  worker: null,
+  useWorker: false,
+  frameId: 0,
+  ringBuffer: [],
+  knownLayout: 1,
+  scanMode: 'init',
 };
 
 const video = $('video');
 const scanCanvas = $('scanCanvas');
 const scanCtx = scanCanvas.getContext('2d', { willReadFrequently: true });
 
-/* --- 転送オブジェクト --- */
+/* ---- 初期化（BarcodeDetector / Worker 判定） ---- */
+async function initReceiver(){
+  let nativeOk = false;
+  if ('BarcodeDetector' in window){
+    try {
+      const fmts = await BarcodeDetector.getSupportedFormats();
+      if (fmts.includes('qr_code')){
+        R.detector = new BarcodeDetector({ formats: ['qr_code'] });
+        nativeOk = true;
+      }
+    } catch (e){}
+  }
+
+  if (nativeOk){
+    R.scanMode = 'native';
+    $('scanMode').textContent = 'BarcodeDetector（高速・複数QR）';
+    $('scanMode').classList.add('native');
+    $('ovMode').textContent = 'NATIVE';
+  } else {
+    const workerCode = `
+      importScripts('https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js');
+      let offCanvas = null, offCtx = null;
+      self.onmessage = function(e){
+        const { id, data, width, height, layout, thorough } = e.data;
+        try {
+          if (!offCanvas || offCanvas.width !== width || offCanvas.height !== height){
+            offCanvas = new OffscreenCanvas(width, height);
+            offCtx = offCanvas.getContext('2d', { willReadFrequently: true });
+          }
+          const imgData = new ImageData(new Uint8ClampedArray(data), width, height);
+          offCtx.putImageData(imgData, 0, 0);
+
+          const opts = thorough ? { inversionAttempts: 'attemptBoth' } : {};
+
+          // 1) 全画面
+          let code = jsQR(imgData.data, width, height, opts);
+          if (code){ self.postMessage({ id, text: code.data }); return; }
+
+          // 2) タイル分割
+          const N = layout || 1;
+          if (N > 1){
+            const cols = Math.round(Math.sqrt(N));
+            const cw = Math.floor(width / cols);
+            const ch = Math.floor(height / cols);
+            for (let r = 0; r < cols; r++){
+              for (let c = 0; c < cols; c++){
+                const cellData = offCtx.getImageData(c*cw, r*ch, cw, ch);
+                code = jsQR(cellData.data, cw, ch, opts);
+                if (code){ self.postMessage({ id, text: code.data }); return; }
+              }
+            }
+          }
+
+          // 3) 高品質パス（2倍アップスケール）
+          if (thorough){
+            const up = new OffscreenCanvas(width*2, height*2);
+            const upCtx = up.getContext('2d');
+            upCtx.imageSmoothingEnabled = false;
+            upCtx.drawImage(offCanvas, 0, 0, width*2, height*2);
+            const upImg = upCtx.getImageData(0, 0, width*2, height*2);
+            code = jsQR(upImg.data, width*2, height*2, { inversionAttempts: 'attemptBoth' });
+            if (code){ self.postMessage({ id, text: code.data }); return; }
+          }
+
+          self.postMessage({ id, text: null });
+        } catch (err){
+          self.postMessage({ id, text: null, error: err.message });
+        }
+      };
+    `;
+    try {
+      R.worker = new Worker(URL.createObjectURL(new Blob([workerCode], { type: 'text/javascript' })));
+      R.worker.onmessage = (e) => {
+        if (e.data && e.data.text) handleScan(e.data.text);
+      };
+      R.useWorker = true;
+      R.scanMode = 'jsqr';
+      $('scanMode').textContent = 'jsQR + Worker（互換モード）';
+      $('ovMode').textContent = 'JSQR';
+    } catch (e){
+      R.scanMode = 'jsqr-main';
+      $('scanMode').textContent = 'jsQR（メインスレッド）';
+      $('ovMode').textContent = 'JSQR';
+    }
+  }
+}
+initReceiver();
+
+/* ---- 転送オブジェクト ---- */
 function getTransfer(id){
   if (R.transfers.has(id)) return R.transfers.get(id);
 
@@ -650,18 +711,13 @@ function getTransfer(id){
   list.prepend(el);
 
   const t = {
-    id, meta: null,
-    solved: new Map(),
-    pending: [],
-    indexMap: new Map(),
-    seenSeeds: new Set(),
-    rawFountain: null,
-    cdf: null,
-    done: false,
+    id, meta: null, solved: new Map(), pending: [], indexMap: new Map(),
+    seenSeeds: new Set(), rawFountain: null, cdf: null, done: false,
+    _lastCount: 0, _lastProgressTime: Date.now(),
     el,
     nameEl: el.querySelector('.name'),
-    pctEl: el.querySelector('.pct'),
-    barEl: el.querySelector('.bar i'),
+    pctEl:  el.querySelector('.pct'),
+    barEl:  el.querySelector('.bar i'),
     metaEl: el.querySelector('.meta'),
     linkEl: el.querySelector('.linkwrap'),
   };
@@ -669,7 +725,6 @@ function getTransfer(id){
   return t;
 }
 
-/* --- UI更新 --- */
 function updateUI(t){
   const K = t.meta ? t.meta.K : 0;
   const got = t.solved.size;
@@ -678,6 +733,9 @@ function updateUI(t){
   t.barEl.style.width = (t.done ? 100 : pct) + '%';
   t.metaEl.textContent = `${got} / ${K} ブロック`;
   if (t.meta) t.nameEl.textContent = t.meta.name;
+
+  if (got > t._lastCount){ t._lastCount = got; t._lastProgressTime = Date.now(); }
+
   if (R.lastActiveId === t.id) updateOverlay(t);
 }
 
@@ -698,41 +756,36 @@ function updateOverlay(t){
     : `${got} / ${K} ブロック (${pct}%)`;
 }
 
-/* --- スキャン結果 --- */
+/* ---- スキャン結果 ---- */
 function handleScan(text){
   if (!text || text.length < 4) return;
   const p = text.split('|');
 
-  /* ---- メタデータ ---- */
-  if (p[0] === 'M2' && p.length >= 10){
+  /* メタ */
+  if (p[0] === 'M2' && p.length >= 11){
     const id = p[1];
+    const layout = parseInt(p[2], 10) || 1;
     const t = getTransfer(id);
     R.lastActiveId = id;
+    R.knownLayout = layout;
 
     if (!t.meta){
       try {
         t.meta = {
-          name:       b64ToStr(p[2]) || 'file',
-          origSize:   parseInt(p[3], 10) || 0,
-          compSize:   parseInt(p[4], 10) || 0,
-          blockSize:  parseInt(p[5], 10) || 0,
-          K:          parseInt(p[6], 10) || 0,
-          compressed: p[7] === '1',
-          type:       b64ToStr(p[8]) || 'application/octet-stream',
-          sha256:     p[9],
+          name:       b64ToStr(p[3]) || 'file',
+          origSize:   parseInt(p[4], 10) || 0,
+          compSize:   parseInt(p[5], 10) || 0,
+          blockSize:  parseInt(p[6], 10) || 0,
+          K:          parseInt(p[7], 10) || 0,
+          compressed: p[8] === '1',
+          type:       b64ToStr(p[9]) || 'application/octet-stream',
+          sha256:     p[10],
         };
         t.cdf = buildDegreeCDF(t.meta.K);
-      } catch (e){
-        console.error('meta parse', e);
-        return;
-      }
+      } catch (e){ console.error('meta', e); return; }
       updateUI(t);
-
-      /* メタ到着前に受け取った冗長パケットを再生 */
       if (t.rawFountain && t.rawFountain.length){
-        for (const { seed, data } of t.rawFountain){
-          processFountain(t, seed, data);
-        }
+        for (const { seed, data } of t.rawFountain) processFountain(t, seed, data);
         t.rawFountain = null;
       }
       checkDone(t);
@@ -740,20 +793,22 @@ function handleScan(text){
     return;
   }
 
-  /* ---- データ ---- */
-  if (p[0] === 'D2' && p.length >= 5){
+  /* データ */
+  if (p[0] === 'D2' && p.length >= 6){
     const id = p[1];
-    const type = p[2];
-    const n = parseInt(p[3], 10);
-    const b64 = p[4];
+    const layout = parseInt(p[2], 10) || 1;
+    const type = p[3];
+    const n = parseInt(p[4], 10);
+    const b64 = p[5];
     if (!Number.isFinite(n) || n < 0) return;
 
     const t = getTransfer(id);
     R.lastActiveId = id;
+    R.knownLayout = layout;
     if (t.done) return;
 
     let data;
-    try { data = b64ToBytes(b64); } catch (e) { return; }
+    try { data = b64ToBytes(b64); } catch (e){ return; }
 
     if (type === 'S'){
       if (t.solved.has(n)) return;
@@ -762,9 +817,7 @@ function handleScan(text){
     } else if (type === 'F'){
       if (t.seenSeeds.has(n)) return;
       t.seenSeeds.add(n);
-
       if (!t.meta){
-        /* メタ未到着なら保留 */
         if (!t.rawFountain) t.rawFountain = [];
         t.rawFountain.push({ seed: n, data });
         if (t.rawFountain.length > 600) t.rawFountain.shift();
@@ -784,23 +837,19 @@ function processFountain(t, seed, data){
   addPacket(t, indices, data);
 }
 
-/* --- ピーリングデコーダ --- */
 function addPacket(t, indices, data){
   if (t.done) return;
   const d = new Uint8Array(data);
-  const remaining = [];
+  const rem = [];
   for (const i of indices){
     if (t.solved.has(i)) xorInPlace(d, t.solved.get(i));
-    else remaining.push(i);
+    else rem.push(i);
   }
-  if (remaining.length === 0) return;
-  if (remaining.length === 1){
-    solveBlock(t, remaining[0], d);
-    return;
-  }
-  const pkt = { indices: remaining, data: d };
+  if (rem.length === 0) return;
+  if (rem.length === 1){ solveBlock(t, rem[0], d); return; }
+  const pkt = { indices: rem, data: d };
   t.pending.push(pkt);
-  for (const i of remaining){
+  for (const i of rem){
     let arr = t.indexMap.get(i);
     if (!arr){ arr = []; t.indexMap.set(i, arr); }
     arr.push(pkt);
@@ -810,42 +859,33 @@ function addPacket(t, indices, data){
 function solveBlock(t, startIdx, startData){
   const queue = [{ idx: startIdx, data: startData }];
   let qi = 0;
-
   while (qi < queue.length){
     const { idx, data } = queue[qi++];
     if (t.solved.has(idx)) continue;
     t.solved.set(idx, data);
-
     const list = t.indexMap.get(idx);
     if (!list) continue;
     t.indexMap.delete(idx);
-
     for (const pkt of list){
       const pos = pkt.indices.indexOf(idx);
       if (pos < 0) continue;
       xorInPlace(pkt.data, data);
       pkt.indices.splice(pos, 1);
-
       if (pkt.indices.length === 1){
-        const newIdx = pkt.indices[0];
+        const ni = pkt.indices[0];
         pkt.indices = [];
-        const arr = t.indexMap.get(newIdx);
-        if (arr){
-          const pp = arr.indexOf(pkt);
-          if (pp >= 0) arr.splice(pp, 1);
-        }
-        queue.push({ idx: newIdx, data: pkt.data });
+        const arr = t.indexMap.get(ni);
+        if (arr){ const pp = arr.indexOf(pkt); if (pp >= 0) arr.splice(pp, 1); }
+        queue.push({ idx: ni, data: pkt.data });
       }
     }
   }
   checkDone(t);
 }
 
-/* --- 完了判定 --- */
 function checkDone(t){
   if (t.done || !t.meta) return;
   if (t.solved.size < t.meta.K) return;
-
   const buf = new Uint8Array(t.meta.K * t.meta.blockSize);
   for (let i = 0; i < t.meta.K; i++){
     const b = t.solved.get(i);
@@ -859,22 +899,18 @@ function checkDone(t){
 async function finalize(t, compressedBytes){
   if (t.done) return;
   t.done = true;
-
   try {
     let finalBytes = compressedBytes;
-    if (t.meta.compressed){
-      finalBytes = await gunzipBytes(compressedBytes);
-    }
+    if (t.meta.compressed) finalBytes = await gunzipBytes(compressedBytes);
 
-    let ok = true;
-    let verifyNote = '';
+    let ok = true, note = '';
     if (t.meta.sha256 && t.meta.sha256 !== 'unavailable' && crypto.subtle){
       const hash = await sha256Hex(finalBytes);
       ok = hash === t.meta.sha256;
-      verifyNote = ok ? '（SHA-256一致）' : '（SHA-256不一致）';
+      note = ok ? '（SHA-256一致）' : '（SHA-256不一致）';
     }
 
-    const blob = new Blob([finalBytes], { type: t.meta.type || 'application/octet-stream' });
+    const blob = new Blob([finalBytes], { type: t.meta.type });
     const url = URL.createObjectURL(blob);
 
     t.el.classList.add('done');
@@ -882,34 +918,74 @@ async function finalize(t, compressedBytes){
     t.pctEl.textContent = '100%';
     t.barEl.style.width = '100%';
     t.metaEl.textContent = ok
-      ? `✓ 受信完了 — ${fmtBytes(finalBytes.length)}${verifyNote}`
-      : `⚠ 受信完了 — ${fmtBytes(finalBytes.length)}${verifyNote}`;
-    if (!ok) t.metaEl.style.color = '#d29922';
+      ? `✓ 受信完了 — ${fmtBytes(finalBytes.length)}${note}`
+      : `⚠ 受信完了 — ${fmtBytes(finalBytes.length)}${note}`;
 
     const a = document.createElement('a');
-    a.className = 'dl';
-    a.href = url;
+    a.className = 'dl'; a.href = url;
     a.download = t.meta.name || 'download';
     a.textContent = '⬇ ダウンロード';
     t.linkEl.appendChild(a);
 
-    /* メモリ解放 */
-    t.solved.clear();
-    t.pending = [];
-    t.indexMap.clear();
-    t.seenSeeds.clear();
-
+    t.solved.clear(); t.pending = []; t.indexMap.clear(); t.seenSeeds.clear();
     updateUI(t);
   } catch (e){
     console.error('finalize', e);
     t.el.classList.add('error');
     t.metaEl.textContent = '⚠ 復元エラー: ' + e.message;
-    t.metaEl.style.color = '#f85149';
   }
 }
 
 /* =========================================================
-   カメラ
+   Ring buffer & stall re-decode
+   ========================================================= */
+const RING_MAX = 5;
+function pushRingBuffer(data, width, height){
+  R.ringBuffer.push({ data, width, height, time: Date.now() });
+  while (R.ringBuffer.length > RING_MAX){
+    const old = R.ringBuffer.shift();
+    old.data = null;
+  }
+}
+
+async function reDecodeRingBuffer(){
+  if (!R.ringBuffer.length) return;
+  const t = R.transfers.get(R.lastActiveId);
+  if (!t || t.done) return;
+  if (R.scanMode === 'jsqr' && R.worker){
+    for (const f of R.ringBuffer){
+      try {
+        const buf = f.data.buffer.slice(0);
+        R.worker.postMessage({
+          id: ++R.frameId, data: buf,
+          width: f.width, height: f.height,
+          layout: R.knownLayout, thorough: true,
+        }, [buf]);
+      } catch (e){}
+    }
+  } else if (R.detector){
+    for (const f of R.ringBuffer){
+      try {
+        const bitmap = await createImageBitmap(new ImageData(f.data, f.width, f.height));
+        const res = await R.detector.detect(bitmap);
+        for (const r of res) if (r.rawValue) handleScan(r.rawValue);
+        bitmap.close && bitmap.close();
+      } catch (e){}
+    }
+  }
+}
+
+function checkStall(){
+  const t = R.transfers.get(R.lastActiveId);
+  if (!t || t.done) return;
+  if (Date.now() - t._lastProgressTime > 2500){
+    reDecodeRingBuffer();
+    t._lastProgressTime = Date.now();
+  }
+}
+
+/* =========================================================
+   Camera & Scan loops
    ========================================================= */
 async function startCamera(){
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
@@ -918,22 +994,21 @@ async function startCamera(){
   }
   try {
     R.stream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: { ideal: 'environment' },
-        width:  { ideal: 1280 },
-        height: { ideal: 720 },
-      },
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
       audio: false,
     });
     video.srcObject = R.stream;
     await video.play();
 
     R.running = true;
+    R.ringBuffer.length = 0;
     $('camBtn').disabled = true;
     $('camStopBtn').disabled = false;
     $('ovStatus').textContent = 'スキャン中…';
     updateOverlay(R.transfers.get(R.lastActiveId) || null);
-    scanLoop();
+
+    if (R.scanMode === 'native') scanLoopNative();
+    else scanLoopWorker();
   } catch (e){
     alert('カメラ起動失敗: ' + e.message);
   }
@@ -946,6 +1021,7 @@ function stopCamera(){
     R.stream = null;
   }
   video.srcObject = null;
+  R.ringBuffer.length = 0;
   $('camBtn').disabled = false;
   $('camStopBtn').disabled = true;
   $('ovStatus').textContent = 'カメラ停止中';
@@ -960,58 +1036,80 @@ function flashScan(){
   flashTimer = setTimeout(() => el.classList.remove('flash'), 100);
 }
 
-function scanLoop(){
-  if (!R.running) return;
-
-  const v = video;
-  if (v.readyState === v.HAVE_ENOUGH_DATA && v.videoWidth){
-    const MAXW = 800;
-    let sw = v.videoWidth, sh = v.videoHeight;
-    if (sw > MAXW){
-      sh = Math.round(sh * MAXW / sw);
-      sw = MAXW;
-    }
-    if (scanCanvas.width !== sw || scanCanvas.height !== sh){
-      scanCanvas.width = sw;
-      scanCanvas.height = sh;
-    }
-    scanCtx.drawImage(v, 0, 0, sw, sh);
-
+/* ---- BarcodeDetector 高速パス ---- */
+async function scanLoopNative(){
+  while (R.running){
     try {
-      const img = scanCtx.getImageData(0, 0, sw, sh);
-      const code = jsQR(img.data, sw, sh, { inversionAttempts: 'dontInvert' });
-      if (code && code.data){
-        handleScan(code.data);
-        flashScan();
+      const results = await R.detector.detect(video);
+      if (results && results.length){
+        let hit = false;
+        for (const r of results){
+          if (r.rawValue){ handleScan(r.rawValue); hit = true; }
+        }
+        if (hit) flashScan();
       }
-    } catch (e){
-      /* 描画中は無視 */
-    }
+    } catch (e){ /* 無視 */ }
+    checkStall();
+    await new Promise(r => setTimeout(r, 0));
   }
-  setTimeout(scanLoop, 50);
 }
 
-$('camBtn').onclick = startCamera;
+/* ---- jsQR Worker パス ---- */
+async function scanLoopWorker(){
+  const MAXW = 800;
+  while (R.running){
+    const v = video;
+    if (v.readyState >= 2 && v.videoWidth){
+      let sw = v.videoWidth, sh = v.videoHeight;
+      if (sw > MAXW){ sh = Math.round(sh * MAXW / sw); sw = MAXW; }
+      if (scanCanvas.width !== sw || scanCanvas.height !== sh){
+        scanCanvas.width = sw; scanCanvas.height = sh;
+      }
+      scanCtx.drawImage(v, 0, 0, sw, sh);
+
+      let imgData;
+      try { imgData = scanCtx.getImageData(0, 0, sw, sh); }
+      catch (e){ imgData = null; }
+
+      if (imgData){
+        // リングバッファ（コピー）
+        pushRingBuffer(new Uint8ClampedArray(imgData.data), sw, sh);
+
+        if (R.useWorker && R.worker){
+          const buf = imgData.data.buffer;
+          R.worker.postMessage({
+            id: ++R.frameId, data: buf,
+            width: sw, height: sh, layout: R.knownLayout,
+          }, [buf]);
+        } else {
+          // メインスレッドの jsQR
+          const code = jsQR(imgData.data, sw, sh);
+          if (code){ handleScan(code.data); flashScan(); }
+        }
+      }
+    }
+    checkStall();
+    await new Promise(r => setTimeout(r, 16));
+  }
+}
+
+$('camBtn').onclick     = startCamera;
 $('camStopBtn').onclick = stopCamera;
 
-/* 全画面トグル（オーバーレイは維持） */
 $('expandBtn').onclick = () => {
   const el = $('videoWrap');
-  if (document.fullscreenElement){
-    document.exitFullscreen && document.exitFullscreen();
-  } else if (el.requestFullscreen){
-    el.requestFullscreen().catch(() => {});
-  }
+  if (document.fullscreenElement) document.exitFullscreen && document.exitFullscreen();
+  else if (el.requestFullscreen) el.requestFullscreen().catch(() => {});
 };
 
 /* =========================================================
-   ライブラリチェック
+   Init checks
    ========================================================= */
 window.addEventListener('load', () => {
   if (typeof qrcode === 'undefined'){
     $('sendStatus').textContent = '⚠ QR生成ライブラリの読み込みに失敗しました';
   }
-  if (typeof jsQR === 'undefined'){
+  if (typeof jsQR === 'undefined' && !R.detector){
     $('recvList').innerHTML = '<div class="empty">⚠ デコードライブラリの読み込みに失敗しました</div>';
   }
   updateOverlay(null);
