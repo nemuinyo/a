@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Animate QR — Fountain + MultiQR</title>
+<title>Animate QR — Fountain MultiQR (Memory-Safe)</title>
 <style>
   :root{
     --bg:#0d1117; --panel:#161b22; --line:#2a3240; --fg:#e6edf3;
@@ -17,7 +17,7 @@
     -webkit-text-size-adjust:100%;
   }
   header{padding:14px 16px 10px;text-align:center;border-bottom:1px solid var(--line)}
-  header h1{margin:0;font-size:17px;letter-spacing:.5px}
+  header h1{margin:0;font-size:17px}
   header .sub{margin-top:3px;font-size:11.5px;color:var(--muted)}
   nav{display:flex;gap:8px;justify-content:center;padding:10px 12px}
   nav button{
@@ -41,6 +41,7 @@
     background:rgba(88,166,255,.15);color:var(--acc2);border:1px solid rgba(88,166,255,.35);
   }
   .badge.native{background:rgba(63,185,80,.15);color:var(--acc);border-color:rgba(63,185,80,.35)}
+  .badge.err{background:rgba(248,81,73,.15);color:var(--err);border-color:rgba(248,81,73,.35)}
   .drop{
     display:flex;align-items:center;justify-content:center;gap:8px;
     min-height:70px;border:2px dashed var(--line);border-radius:12px;
@@ -77,7 +78,7 @@
   }
   .ov-top{display:flex;justify-content:space-between;align-items:center;gap:6px}
   .ov-top .st{font-weight:600;text-shadow:0 1px 3px rgba(0,0,0,.9);font-size:11.5px}
-  .ov-tags{display:flex;gap:4px;pointer-events:none}
+  .ov-tags{display:flex;gap:4px}
   .ov-tag{background:rgba(0,0,0,.55);padding:2px 7px;border-radius:6px;font-size:10.5px;font-weight:600}
   .mini-btn{
     pointer-events:auto;background:rgba(255,255,255,.18);border:none;color:#fff;
@@ -114,7 +115,7 @@
 
 <header>
   <h1>📡 Animate QR — Fountain MultiQR</h1>
-  <div class="sub">圧縮 → ファウンテン符号 → 複数QR同時表示 → SHA-256検証</div>
+  <div class="sub">圧縮 → ファウンテン符号 → 複数QR → SHA-256検証</div>
 </header>
 
 <nav>
@@ -135,8 +136,8 @@
       <div class="row">
         <label>QR配置</label>
         <select id="layoutSel">
-          <option value="1" selected>1×1（標準・安定）</option>
-          <option value="4">2×2（高速・画面に近づける）</option>
+          <option value="1" selected>1×1（標準）</option>
+          <option value="4">2×2（高速・近づける）</option>
         </select>
       </div>
       <div class="row">
@@ -201,6 +202,10 @@
         <label style="flex:0 0 auto">スキャナ</label>
         <span id="scanMode" class="badge">初期化中…</span>
       </div>
+      <div class="row" style="justify-content:center">
+        <label style="flex:0 0 auto">メモリ</label>
+        <span id="memInfo" class="badge">—</span>
+      </div>
       <div class="hint">※ カメラは HTTPS または localhost でのみ動作します</div>
     </div>
 
@@ -215,7 +220,7 @@
 
 <footer>
   送信側「再生」→ 受信側でカメラを向けるだけ。<br>
-  冗長パケットが欠損を自動修復し、SHA-256 で改ざん・破損を検出します。
+  冗長パケットが欠損を自動修復し、SHA-256 で検証します。
 </footer>
 
 <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
@@ -227,6 +232,7 @@
 const $ = id => document.getElementById(id);
 const enc = new TextEncoder();
 const dec = new TextDecoder();
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 function bytesToB64(bytes){
   let s = ''; const CH = 0x8000;
@@ -310,15 +316,30 @@ function pickDegree(rng, cdf){
   for (let i = 0; i < cdf.length; i++) if (u <= cdf[i]) return i + 1;
   return cdf.length;
 }
+
+/* ★ Floyd法：小次数のときO(degree)で済む。Kが大きくてもアロケーショ
+     少。送受信で完全に同じ系列を返すので整合性OK。 */
 function pickIndices(rng, K, degree){
   degree = Math.min(degree, K);
-  const arr = new Array(K);
-  for (let i = 0; i < K; i++) arr[i] = i;
-  for (let i = 0; i < degree; i++){
-    const j = i + Math.floor(rng() * (K - i));
-    const t = arr[i]; arr[i] = arr[j]; arr[j] = t;
+  if (degree <= 0) return [];
+  if (degree * 2 >= K){
+    // 高次数：全体配列を作って部分シャッフル（元の実装）
+    const arr = new Array(K);
+    for (let i = 0; i < K; i++) arr[i] = i;
+    for (let i = 0; i < degree; i++){
+      const j = i + Math.floor(rng() * (K - i));
+      const t = arr[i]; arr[i] = arr[j]; arr[j] = t;
+    }
+    return arr.slice(0, degree);
   }
-  return arr.slice(0, degree);
+  // Floyd法（小次数）
+  const picked = new Set();
+  for (let i = K - degree; i < K; i++){
+    const j = Math.floor(rng() * (i + 1));
+    if (picked.has(j)) picked.add(i);
+    else picked.add(j);
+  }
+  return Array.from(picked);
 }
 
 /* =========================================================
@@ -359,7 +380,7 @@ function drawPlaceholder(){
 }
 drawPlaceholder();
 
-/* ---- パケット生成 ---- */
+/* ---- パケット ---- */
 function metaString(){
   const name = S.name.slice(0, 200);
   return `M2|${S.id}|${S.layout}|${strToB64(name)}|${S.origSize}|${S.compSize}|${S.blockSize}|${S.K}|${S.compressed ? 1 : 0}|${strToB64(S.type)}|${S.sha}`;
@@ -371,6 +392,7 @@ function fountainString(seed){
   const rng = mulberry32(seed);
   const degree = pickDegree(rng, S.cdf);
   const indices = pickIndices(rng, S.K, degree);
+  // 作業バッファを都度確保（400B程度なので軽い）
   const payload = new Uint8Array(S.blockSize);
   for (const i of indices) xorInPlace(payload, S.blocks[i]);
   return `D2|${S.id}|${S.layout}|F|${seed}|${bytesToB64(payload)}`;
@@ -405,10 +427,7 @@ function drawMultiQR(packets){
       const totalM = n + quiet * 2;
       const cell = Math.max(1, Math.floor(tile / totalM));
       const drawSize = cell * totalM;
-      if (drawSize > tile){
-        // タイルに収まらない → スキップ
-        continue;
-      }
+      if (drawSize > tile) continue;
       const offX = x0 + Math.floor((tile - drawSize) / 2);
       const offY = y0 + Math.floor((tile - drawSize) / 2);
       qrCtx.fillStyle = '#000000';
@@ -419,7 +438,7 @@ function drawMultiQR(packets){
           }
         }
       }
-    } catch (e){ /* 1タイル失敗は無視 */ }
+    } catch (e){ /* タイル失敗は無視 */ }
   }
 }
 
@@ -435,7 +454,6 @@ function drawNext(){
     `${S.name}（${fmtBytes(S.origSize)}） — 系統 ${sys}/${S.K} + 冗長 ${fnt}`;
 }
 
-/* ---- ループ ---- */
 function loop(ts){
   if (!S.running) return;
   const interval = 1000 / S.fps;
@@ -456,7 +474,6 @@ function stopPlay(){
   $('stopBtn').disabled = true;
 }
 
-/* ---- 準備 ---- */
 async function prepareFile(file){
   stopPlay();
   S.ready = false;
@@ -493,7 +510,7 @@ async function prepareFile(file){
 
     const cycleSec = (S.K / S.fps).toFixed(1);
     $('sendStatus').textContent =
-      `準備完了 — ${S.K} ブロック × ${S.blockSize} B　（1周 約${cycleSec}秒）`;
+      `準備完了 — ${S.K} ブロック × ${S.blockSize} B（1周 約${cycleSec}秒）`;
     $('startBtn').disabled = false;
   } catch (e){
     console.error(e);
@@ -518,7 +535,6 @@ function rebuildBlocks(){
   S.ready = true;
 }
 
-/* ---- UI ---- */
 function estimateMaxChunk(ec){
   const caps = { L: 2900, M: 2280, Q: 1620, H: 1230 };
   return Math.floor((caps[ec] - 80) * 3 / 4);
@@ -592,17 +608,26 @@ const R = {
   detector: null,
   worker: null,
   useWorker: false,
+  workerBusy: false,
+  workerWatchdog: 0,
   frameId: 0,
-  ringBuffer: [],
   knownLayout: 1,
   scanMode: 'init',
+  // ★ 事前確保リングバッファ（3枠・再アロケーションフリー）
+  ring: [
+    { data: null, width: 0, height: 0, time: 0 },
+    { data: null, width: 0, height: 0, time: 0 },
+    { data: null, width: 0, height: 0, time: 0 },
+  ],
+  ringIdx: 0,
+  ringCount: 0,
 };
 
 const video = $('video');
 const scanCanvas = $('scanCanvas');
 const scanCtx = scanCanvas.getContext('2d', { willReadFrequently: true });
 
-/* ---- 初期化（BarcodeDetector / Worker 判定） ---- */
+/* ---- 初期化 ---- */
 async function initReceiver(){
   let nativeOk = false;
   if ('BarcodeDetector' in window){
@@ -633,14 +658,11 @@ async function initReceiver(){
           }
           const imgData = new ImageData(new Uint8ClampedArray(data), width, height);
           offCtx.putImageData(imgData, 0, 0);
-
           const opts = thorough ? { inversionAttempts: 'attemptBoth' } : {};
 
-          // 1) 全画面
           let code = jsQR(imgData.data, width, height, opts);
           if (code){ self.postMessage({ id, text: code.data }); return; }
 
-          // 2) タイル分割
           const N = layout || 1;
           if (N > 1){
             const cols = Math.round(Math.sqrt(N));
@@ -648,24 +670,21 @@ async function initReceiver(){
             const ch = Math.floor(height / cols);
             for (let r = 0; r < cols; r++){
               for (let c = 0; c < cols; c++){
-                const cellData = offCtx.getImageData(c*cw, r*ch, cw, ch);
-                code = jsQR(cellData.data, cw, ch, opts);
+                const cd = offCtx.getImageData(c*cw, r*ch, cw, ch);
+                code = jsQR(cd.data, cw, ch, opts);
                 if (code){ self.postMessage({ id, text: code.data }); return; }
               }
             }
           }
-
-          // 3) 高品質パス（2倍アップスケール）
           if (thorough){
             const up = new OffscreenCanvas(width*2, height*2);
             const upCtx = up.getContext('2d');
             upCtx.imageSmoothingEnabled = false;
             upCtx.drawImage(offCanvas, 0, 0, width*2, height*2);
-            const upImg = upCtx.getImageData(0, 0, width*2, height*2);
-            code = jsQR(upImg.data, width*2, height*2, { inversionAttempts: 'attemptBoth' });
+            const ui = upCtx.getImageData(0, 0, width*2, height*2);
+            code = jsQR(ui.data, width*2, height*2, { inversionAttempts: 'attemptBoth' });
             if (code){ self.postMessage({ id, text: code.data }); return; }
           }
-
           self.postMessage({ id, text: null });
         } catch (err){
           self.postMessage({ id, text: null, error: err.message });
@@ -675,6 +694,7 @@ async function initReceiver(){
     try {
       R.worker = new Worker(URL.createObjectURL(new Blob([workerCode], { type: 'text/javascript' })));
       R.worker.onmessage = (e) => {
+        R.workerBusy = false;            // ★ 背圧解除
         if (e.data && e.data.text) handleScan(e.data.text);
       };
       R.useWorker = true;
@@ -714,6 +734,7 @@ function getTransfer(id){
     id, meta: null, solved: new Map(), pending: [], indexMap: new Map(),
     seenSeeds: new Set(), rawFountain: null, cdf: null, done: false,
     _lastCount: 0, _lastProgressTime: Date.now(),
+    _cleanTick: 0,
     el,
     nameEl: el.querySelector('.name'),
     pctEl:  el.querySelector('.pct'),
@@ -735,7 +756,6 @@ function updateUI(t){
   if (t.meta) t.nameEl.textContent = t.meta.name;
 
   if (got > t._lastCount){ t._lastCount = got; t._lastProgressTime = Date.now(); }
-
   if (R.lastActiveId === t.id) updateOverlay(t);
 }
 
@@ -756,12 +776,11 @@ function updateOverlay(t){
     : `${got} / ${K} ブロック (${pct}%)`;
 }
 
-/* ---- スキャン結果 ---- */
+/* ---- スキャン結果処理 ---- */
 function handleScan(text){
   if (!text || text.length < 4) return;
   const p = text.split('|');
 
-  /* メタ */
   if (p[0] === 'M2' && p.length >= 11){
     const id = p[1];
     const layout = parseInt(p[2], 10) || 1;
@@ -793,7 +812,6 @@ function handleScan(text){
     return;
   }
 
-  /* データ */
   if (p[0] === 'D2' && p.length >= 6){
     const id = p[1];
     const layout = parseInt(p[2], 10) || 1;
@@ -820,7 +838,7 @@ function handleScan(text){
       if (!t.meta){
         if (!t.rawFountain) t.rawFountain = [];
         t.rawFountain.push({ seed: n, data });
-        if (t.rawFountain.length > 600) t.rawFountain.shift();
+        if (t.rawFountain.length > 400) t.rawFountain.shift();
         return;
       }
       processFountain(t, n, data);
@@ -835,6 +853,30 @@ function processFountain(t, seed, data){
   const degree = pickDegree(rng, t.cdf);
   const indices = pickIndices(rng, t.meta.K, degree);
   addPacket(t, indices, data);
+}
+
+/* ★ pendingの定期掃除（メモリ爆発防止） */
+function cleanPending(t){
+  t._cleanTick++;
+  if (t._cleanTick % 200 !== 0 && t.pending.length < 400) return;
+
+  // 空パケット除去
+  t.pending = t.pending.filter(p => p.indices.length > 0);
+
+  // まだ多すぎるなら古いものから捨てる
+  if (t.pending.length > 500){
+    const excess = t.pending.length - 400;
+    const dropped = t.pending.splice(0, excess);
+    for (const pkt of dropped){
+      for (const i of pkt.indices){
+        const arr = t.indexMap.get(i);
+        if (arr){
+          const pp = arr.indexOf(pkt);
+          if (pp >= 0) arr.splice(pp, 1);
+        }
+      }
+    }
+  }
 }
 
 function addPacket(t, indices, data){
@@ -854,6 +896,7 @@ function addPacket(t, indices, data){
     if (!arr){ arr = []; t.indexMap.set(i, arr); }
     arr.push(pkt);
   }
+  cleanPending(t);
 }
 
 function solveBlock(t, startIdx, startData){
@@ -925,9 +968,15 @@ async function finalize(t, compressedBytes){
     a.className = 'dl'; a.href = url;
     a.download = t.meta.name || 'download';
     a.textContent = '⬇ ダウンロード';
+    // ★ ダウンロード後にBlobを解放
+    a.addEventListener('click', () => {
+      setTimeout(() => URL.revokeObjectURL(url), 3000);
+    });
     t.linkEl.appendChild(a);
 
+    // ★ メモリ解放
     t.solved.clear(); t.pending = []; t.indexMap.clear(); t.seenSeeds.clear();
+    t.rawFountain = null;
     updateUI(t);
   } catch (e){
     console.error('finalize', e);
@@ -937,55 +986,68 @@ async function finalize(t, compressedBytes){
 }
 
 /* =========================================================
-   Ring buffer & stall re-decode
+   リングバッファ（事前確保）
    ========================================================= */
-const RING_MAX = 5;
-function pushRingBuffer(data, width, height){
-  R.ringBuffer.push({ data, width, height, time: Date.now() });
-  while (R.ringBuffer.length > RING_MAX){
-    const old = R.ringBuffer.shift();
-    old.data = null;
+function pushRing(data, width, height){
+  const slot = R.ring[R.ringIdx];
+  if (slot.data && slot.data.length === data.length){
+    slot.data.set(data);  // 再アロケーションなし
+  } else {
+    slot.data = new Uint8ClampedArray(data);
   }
+  slot.width = width;
+  slot.height = height;
+  slot.time = Date.now();
+  R.ringIdx = (R.ringIdx + 1) % R.ring.length;
+  R.ringCount = Math.min(R.ringCount + 1, R.ring.length);
 }
 
-async function reDecodeRingBuffer(){
-  if (!R.ringBuffer.length) return;
+async function reDecodeRing(){
+  if (R.ringCount === 0) return;
   const t = R.transfers.get(R.lastActiveId);
   if (!t || t.done) return;
-  if (R.scanMode === 'jsqr' && R.worker){
-    for (const f of R.ringBuffer){
+
+  // 直近の充実したフレームのみ
+  for (let k = 0; k < R.ringCount; k++){
+    const slot = R.ring[k];
+    if (!slot.data) continue;
+    if (R.useWorker && R.worker){
+      R.workerBusy = true;
+      R.workerWatchdog = Date.now();
+      const copy = new Uint8Array(slot.data.length);
+      copy.set(slot.data);
+      R.worker.postMessage({
+        id: ++R.frameId, data: copy.buffer,
+        width: slot.width, height: slot.height,
+        layout: R.knownLayout, thorough: true,
+      }, [copy.buffer]);
+      // 完了を待つ
+      while (R.workerBusy && Date.now() - R.workerWatchdog < 3000) await sleep(20);
+      R.workerBusy = false;
+    } else if (R.detector){
       try {
-        const buf = f.data.buffer.slice(0);
-        R.worker.postMessage({
-          id: ++R.frameId, data: buf,
-          width: f.width, height: f.height,
-          layout: R.knownLayout, thorough: true,
-        }, [buf]);
-      } catch (e){}
-    }
-  } else if (R.detector){
-    for (const f of R.ringBuffer){
-      try {
-        const bitmap = await createImageBitmap(new ImageData(f.data, f.width, f.height));
-        const res = await R.detector.detect(bitmap);
+        const id = new ImageData(slot.data.slice(), slot.width, slot.height);
+        const bmp = await createImageBitmap(id);
+        const res = await R.detector.detect(bmp);
         for (const r of res) if (r.rawValue) handleScan(r.rawValue);
-        bitmap.close && bitmap.close();
+        bmp.close && bmp.close();
       } catch (e){}
     }
   }
 }
 
+/* ---- 監視 ---- */
 function checkStall(){
   const t = R.transfers.get(R.lastActiveId);
   if (!t || t.done) return;
-  if (Date.now() - t._lastProgressTime > 2500){
-    reDecodeRingBuffer();
+  if (Date.now() - t._lastProgressTime > 3000){
+    reDecodeRing();
     t._lastProgressTime = Date.now();
   }
 }
 
 /* =========================================================
-   Camera & Scan loops
+   Camera
    ========================================================= */
 async function startCamera(){
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
@@ -1001,7 +1063,8 @@ async function startCamera(){
     await video.play();
 
     R.running = true;
-    R.ringBuffer.length = 0;
+    R.ringCount = 0;
+    R.workerBusy = false;
     $('camBtn').disabled = true;
     $('camStopBtn').disabled = false;
     $('ovStatus').textContent = 'スキャン中…';
@@ -1021,7 +1084,8 @@ function stopCamera(){
     R.stream = null;
   }
   video.srcObject = null;
-  R.ringBuffer.length = 0;
+  R.ringCount = 0;
+  R.workerBusy = false;
   $('camBtn').disabled = false;
   $('camStopBtn').disabled = true;
   $('ovStatus').textContent = 'カメラ停止中';
@@ -1036,9 +1100,11 @@ function flashScan(){
   flashTimer = setTimeout(() => el.classList.remove('flash'), 100);
 }
 
-/* ---- BarcodeDetector 高速パス ---- */
+/* ★ BarcodeDetector：rAFで回す（メインスレッドブロック回避） */
 async function scanLoopNative(){
   while (R.running){
+    await new Promise(r => requestAnimationFrame(r));
+    if (!R.running) break;
     try {
       const results = await R.detector.detect(video);
       if (results && results.length){
@@ -1048,16 +1114,26 @@ async function scanLoopNative(){
         }
         if (hit) flashScan();
       }
-    } catch (e){ /* 無視 */ }
+    } catch (e){}
     checkStall();
-    await new Promise(r => setTimeout(r, 0));
   }
 }
 
-/* ---- jsQR Worker パス ---- */
+/* ★ jsQR：Worker背圧制御 + 低解像度 + リングバッファ */
 async function scanLoopWorker(){
-  const MAXW = 800;
+  const MAXW = 640;  // 480〜640が実用。800は過剰でOOMの原因
   while (R.running){
+    // ワーカーが忙しければ待つ（これが爆発防止の鍵）
+    if (R.workerBusy){
+      if (Date.now() - R.workerWatchdog > 3000){
+        R.workerBusy = false;  // ウォッチドッグ
+      } else {
+        await sleep(5);
+        continue;
+      }
+    }
+    if (!R.running) break;
+
     const v = video;
     if (v.readyState >= 2 && v.videoWidth){
       let sw = v.videoWidth, sh = v.videoHeight;
@@ -1067,29 +1143,29 @@ async function scanLoopWorker(){
       }
       scanCtx.drawImage(v, 0, 0, sw, sh);
 
-      let imgData;
-      try { imgData = scanCtx.getImageData(0, 0, sw, sh); }
-      catch (e){ imgData = null; }
+      let imgData = null;
+      try { imgData = scanCtx.getImageData(0, 0, sw, sh); } catch (e){}
 
       if (imgData){
-        // リングバッファ（コピー）
-        pushRingBuffer(new Uint8ClampedArray(imgData.data), sw, sh);
+        // リングバッファにはコピー（プール再利用）
+        pushRing(imgData.data, sw, sh);
 
         if (R.useWorker && R.worker){
+          R.workerBusy = true;
+          R.workerWatchdog = Date.now();
           const buf = imgData.data.buffer;
           R.worker.postMessage({
             id: ++R.frameId, data: buf,
             width: sw, height: sh, layout: R.knownLayout,
           }, [buf]);
         } else {
-          // メインスレッドの jsQR
           const code = jsQR(imgData.data, sw, sh);
           if (code){ handleScan(code.data); flashScan(); }
         }
       }
     }
     checkStall();
-    await new Promise(r => setTimeout(r, 16));
+    await sleep(0);
   }
 }
 
@@ -1102,9 +1178,19 @@ $('expandBtn').onclick = () => {
   else if (el.requestFullscreen) el.requestFullscreen().catch(() => {});
 };
 
-/* =========================================================
-   Init checks
-   ========================================================= */
+/* ---- メモリ情報（対応ブラウザのみ） ---- */
+function updateMemInfo(){
+  if (performance && performance.memory){
+    const m = performance.memory;
+    const usedMB = (m.usedJSHeapSize / 1048576).toFixed(1);
+    const limMB = (m.jsHeapSizeLimit / 1048576).toFixed(0);
+    const pct = (m.usedJSHeapSize / m.jsHeapSizeLimit * 100).toFixed(0);
+    $('memInfo').textContent = `${usedMB} / ${limMB} MB (${pct}%)`;
+    $('memInfo').classList.toggle('err', +pct > 75);
+  }
+}
+setInterval(updateMemInfo, 1500);
+
 window.addEventListener('load', () => {
   if (typeof qrcode === 'undefined'){
     $('sendStatus').textContent = '⚠ QR生成ライブラリの読み込みに失敗しました';
@@ -1113,6 +1199,7 @@ window.addEventListener('load', () => {
     $('recvList').innerHTML = '<div class="empty">⚠ デコードライブラリの読み込みに失敗しました</div>';
   }
   updateOverlay(null);
+  updateMemInfo();
 });
 </script>
 </body>
